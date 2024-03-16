@@ -1,0 +1,2220 @@
+#!/sbin/bash
+# Created by @AdrianoA3 (licenced under GPLv3)
+# Thanks @denwarenji for aswering doubts about his scripts for Vayu and Nabu
+# Thanks @aistop0 for testing on eMMC device
+# read -p sometimes goes buggy on ADB, so echo -n && read is a good bypass for that
+
+# Get storage device
+storage=$(getprop ro.boot.bootdevice)
+[[ -z $storage ]] && {
+	echo Could not get the storage device.
+	echo Can not proceed this way.
+	echo "Please, report this to: t.me/AdrianoA3"
+	echo
+	exit
+}
+
+# Get the disk name
+for partition in userdata cache ssd switch misc logfs bk01 frp; do
+	[[ -e /dev/block/platform/soc/$storage/by-name/$partition ]] && {
+		disk=$(ls -l /dev/block/platform/soc/$storage/by-name/$partition | awk '{print $NF}' | sed 's/\/dev\/block\///g ; s/[0-9]*$//g ; s/p$//g')
+		break
+	}
+	(( try++ ))
+done
+[[ -e /dev/block/$disk ]] || {
+	echo Could not locate the proper disk to work.
+	echo -n "Do you want to enter its name manually? (y/n): " && read -n 1 user_input
+	[[ $user_input =~ ^[yY]$ ]] || exit
+	echo
+	echo
+	echo -n "Enter only the disk name: " && read user_input
+	echo
+	echo
+	[[ ! -e /dev/block/$user_input || $try == 8 ]] && {
+		echo The disk $user_input does not exist.
+		echo Exiting...
+		echo
+		exit
+	}
+}
+
+[[ -z $1 ]] && {
+	# Check environment
+	echo
+	for binary in parted sgdisk dmsetup unlink unset clear echo [[ while read grep awk wc sed sleep clear case mkdir rm dd tail exit cat chmod mount umount printf ls mkfs.fat mkfs.ntfs mke2fs make_f2fs shift tr getprop stat zip; do
+		unset found
+		command -v $binary > /dev/null 2>&1 && {
+			found=1
+		}||{
+			[[ -e /sbin/duckpartdir/busybox && $(/sbin/duckpartdir/busybox --list | grep $binary | wc -l) -gt 0 ]] && {
+				ln -s /sbin/duckpartdir/busybox /sbin/$binary && {
+					found=1
+				}||{
+					ln -s /sbin/duckpartdir/busybox /system/bin/$binary && found=1
+				}
+			}
+			[[ -e /sbin/duckpartdir/toybox && -z $found && $(/sbin/duckpartdir/toybox | grep $binary | wc -l) -gt 0 ]] && {
+				ln -s /sbin/duckpartdir/toybox /sbin/$binary && {
+					found=1
+				}||{
+					ln -s /sbin/duckpartdir/toybox /system/bin/$binary && found=1
+				}
+			}
+		}
+		[[ $found == 1 ]] && {
+			case $binary in
+				"mkfs.fat")
+					canformatfat=1
+				;;
+				"mkfs.ntfs")
+					canformatntfs=1
+				;;
+				"mke2fs")
+					canformatext4=1
+				;;
+				"make_f2fs")
+					canformatf2fs=1
+				;;
+				*)
+					command -v $binary > /dev/null 2>&1 || {
+						echo
+						echo "$binary command/binary is missing..."
+						echo "Can not proceed without it."
+						echo
+						exit
+					}
+				;;
+			esac
+		}
+
+	done
+
+	# Predefined partitions sizes
+	esp_size_b=$(( 300 * 1024 * 1024 )) # 300 MiB is enough
+	userdata_min=$(( 100 * 1024 * 1024 )) # 100 MiB. I don't think Android will boot this way but userdata will be there
+	windows_min=$(( 27 * 1024 * 1024 * 1024 )) # 27 GiB as in https://www.minitool.com/data-recovery/how-much-space-does-windows-11-take.html
+
+	clear
+	#################################################################################################
+	#################################################################################################
+
+	cat << DISCLAIMER
+I AM NOT RESPONSIBLE FOR BRICKED DEVICES, DEAD SD CARDS, THERMONUCLEAR WAR, OR YOU GETTING FIRED BECAUSE THE ALARM APP FAILED.
+PLEASE DO SOME RESEARCH IF YOU HAVE ANY CONCERNS ABOUT FEATURES INCLUDED IN THIS TOOL BEFORE USING IT!
+YOU ARE CHOOSING TO MAKE THESE MODIFICATIONS, AND IF YOU POINT THE FINGER AT ME FOR MESSING UP YOUR DEVICE, I WILL BRUH AT YOU.
+
+You have been warned.
+
+DISCLAIMER
+
+	echo -n "Even so, do you want to continue [y/n]: " && read -n 1 user_input
+	[[ $user_input =~ ^[yY]$ ]] || {
+		echo
+		echo
+		echo Good choice.
+		echo Nothing was changed on your device, so reboot and enjoy it.
+		echo
+		exit
+	}
+	clear
+	#################################################################################################
+	#################################################################################################
+
+	# Get device name
+	device_name=$(getprop ro.build.product)
+	[[ -z $device_name ]] && device_name=$(getprop ro.product.device)
+	[[ -z $device_name ]] && device_name=$(getprop ro.product.product.device)
+	[[ -z $device_name ]] && device_name=$(getprop ro.product.system.device)
+	[[ -z $device_name ]] && device_name=$(getprop ro.product.system_ext.device)
+	[[ -z $device_name ]] && device_name=$(getprop ro.product.vendor.device)
+	[[ -z $device_name ]] && device_name="android"
+	device_name=$(echo $device_name | tr '[a-z]' '[A-Z]')
+
+	# Get disk partitions sector alignment number
+	PSAN=$(sgdisk --display-alignment /dev/block/$disk)
+}
+
+pressanykeytocontinue(){
+	echo
+	echo -n Press any key to continue... && read -n1
+}
+
+format_userdata(){
+	unset format_done
+	[[ $msc_status == 1 ]] && {
+		echo "Can not proceed with Mass Storage mode enabled."
+		echo "Disable it and try again."
+		return_main
+	}
+	userdata_number=$1
+	[[ -z $userdata_number ]] && userdata_number=$(ls -l /dev/block/platform/soc/$storage/by-name | grep " userdata " | awk '{print $NF}' | sed "s/\/dev\/block\/$disk//g" | sed 's/^p//g')
+	[[ -z $userdata_number ]] && {
+		echo Could not find userdata partition number.
+		echo Please pick it from the list.
+		echo "$linebar"
+		echo "$(parted -s /dev/block/$disk print | grep " userdata")"
+		echo "$linebar"
+		echo
+		while true; do
+			echo -n "Enter the number of userdata partition: " && read fu_userdata_number
+			echo
+			[[ $fu_userdata_number =~ ^[0-9]+$ ]] && {
+				[[ $(parted -s /dev/block/$disk print 2>/dev/null | grep " userdata" | grep ^$fu_userdata_number | wc -l) == 1 ]] && {
+					userdata_number=$fu_userdata_number
+					break
+				}
+			}||{
+				echo Invalid number.
+				echo
+			}
+		done
+	}
+	[[ $userdata_number -gt $critical_number && -n $userdata_number ]] || {
+		echo "Userdata partition number [$userdata_number] is marked as dangerous to manage."
+		echo Reason: It is below critical partition $critical_number.
+		echo This tool will be closed to avoid any damage.
+		echo
+		exit
+	}
+
+	[[ -z $canformatext4 && -z $canformatf2fs ]] && {
+		echo Can not format userdata.
+		echo Use built-in recovery utility.
+		pressanykeytocontinue
+	}||{
+		while true; do
+			echo Formart userdata as...
+			echo
+			[[ -n $canformatf2fs ]] && echo "F. F2FS" || echo "!. Use recovery menu to format as F2FS."
+			[[ -n $canformatext4 ]] && echo "E. EXT4" || echo "!. Use recovery menu to format as EXT4."
+			echo -n "Choose: " && read -n 1 userdata_fs
+			echo
+			[[ -n $canformatext4 && -n $canformatf2fs && $userdata_fs =~ ^[fFeE]$ ]] && break
+			[[ -z $canformatext4 && -n $canformatf2fs && $userdata_fs =~ ^[fF]$ ]] && break
+			[[ -n $canformatext4 && -z $canformatf2fs && $userdata_fs =~ ^[eE]$ ]] && break
+		done
+		[[ $userdata_fs =~ ^[eE]$ ]] && {
+			echo Formating userdata as EXT4...
+			echo "$linebar"
+			mke2fs -F -t ext4 /dev/block/$disk${TFP}$userdata_number && {
+				echo "$linebar"
+				echo "     Done."
+				format_done=1
+			}||{
+				echo "$linebar"
+				echo "     Could not format userdata as ext4."
+				echo "     The error must be described just above."
+				pressanykeytocontinue
+			}
+		}||{
+			echo Formating userdata as F2FS...
+			echo "$linebar"
+			make_f2fs -q -f -g android /dev/block/$disk${TFP}$userdata_number && {
+				echo "$linebar"
+				echo "     Done."
+				format_done=1
+			}||{
+				echo "$linebar"
+				echo "     Could not format userdata as f2fs."
+				echo "     The error must be described just above."
+				pressanykeytocontinue
+			}
+		}
+		[[ $format_done == 1 ]] && {
+			while true; do
+				echo
+				echo If userdata was encrypted, cache and metadata must be formatted also.
+				echo -n "Was userdata encrypted? (y/n): " && read -n 1 user_input
+				echo
+				[[ $user_input =~ ^[yYnN]$ ]] && break
+			done
+			[[ $user_input =~ ^[yY]$ ]] && {
+				[[ -e /dev/block/platform/soc/$storage/by-name/cache ]] && {
+					echo Cache found.
+					echo Formatting as ext4...
+					echo "$linebar"
+					mke2fs -F -t ext4 /dev/block/platform/soc/$storage/by-name/cache && {
+						echo "$linebar"
+						echo "     Done."
+					}||{
+						echo "$linebar"
+						echo "     The error must be described just above."
+					}
+				}
+				[[ -e /dev/block/platform/soc/$storage/by-name/metadata ]] && {
+					echo Metadata found.
+					echo Formatting as ext4...
+					echo "$linebar"
+					mke2fs -F -t ext4 /dev/block/platform/soc/$storage/by-name/metadata && {
+						echo "$linebar"
+						echo "     Done."
+					}||{
+						echo "$linebar"
+						echo "     The error must be described just above."
+					}
+				}
+			}
+		}
+	}
+}
+
+format_linux(){
+	[[ $msc_status == 1 ]] && {
+		echo "Can not proceed with Mass Storage mode enabled."
+		echo "Disable it and try again."
+		return_main
+	}
+	[[ -z $canformatext4 ]] && {
+		echo "Can not format Linux partition."
+		pressanykeytocontinue
+	}||{
+		linux_number=$1
+		[[ -z $linux_number ]] && linux_number=$(ls -l /dev/block/platform/soc/$storage/by-name | grep " linux " | awk '{print $NF}' | sed "s/\/dev\/block\/$disk//g" | sed 's/^p//g')
+		[[ -z $linux_number ]] && {
+			echo Could not find Linux partition number.
+			echo Please pick it from the list.
+			echo "$linebar"
+			echo "$(parted -s /dev/block/$disk print 2>/dev/null | grep " linux")"
+			echo "$linebar"
+			echo
+			while true; do
+				echo -n "Enter the number of Linux partition: " && read fl_linux_number
+				echo
+				[[ $fl_linux_number =~ ^[0-9]+$ ]] && {
+					[[ $(parted -s /dev/block/$disk print 2>/dev/null | grep " linux" | grep ^$fl_linux_number | wc -l) == 1 ]] && {
+						linux_number=$fl_linux_number
+						break
+					}
+				}||{
+					echo Invalid number.
+					echo
+				}
+			done
+		}
+		[[ $linux_number -gt $critical_number && -n $linux_number ]] || {
+			echo "Linux partition number [$linux_number] is marked as dangerous to manage."
+			echo Reason: It is below critical partition $critical_number.
+			echo This tool will be closed to avoid any damage.
+			echo
+			exit
+		}
+		echo Formating Linux as EXT4...
+		echo "$linebar"
+		mke2fs -F -t ext4 /dev/block/$disk${TFP}$linux_number && {
+			echo "$linebar"
+			echo "     Done."
+		}||{
+			echo "$linebar"
+			echo "     Could not format userdata as ext4."
+			echo "     The error must be described just above."
+			pressanykeytocontinue
+		}
+	}
+}
+
+format_windows(){
+	[[ $msc_status == 1 ]] && {
+		echo "Can not proceed with Mass Storage mode enabled."
+		echo "Disable it and try again."
+		return_main
+	}
+	[[ -z $canformatntfs ]] && {
+		echo "Can not format Windows partition."
+		pressanykeytocontinue
+	}||{
+		windows_number=$1
+		[[ -z $windows_number ]] && windows_number=$(ls -l /dev/block/platform/soc/$storage/by-name | grep " win " | awk '{print $NF}' | sed "s/\/dev\/block\/$disk//g" | sed 's/^p//g')
+		[[ -z $windows_number ]] && {
+			echo Could not find Windows partition number.
+			echo Please pick it from the list.
+			echo "$linebar"
+			echo "$(parted -s /dev/block/$disk print 2>/dev/null | grep "win")"
+			echo "$linebar"
+			echo
+			while true; do
+				echo -n "Enter the number of Windows partition: " && read fw_windows_number
+				echo
+				echo
+				[[ $fw_windows_number =~ ^[0-9]+$ ]] && {
+					[[ $(parted -s /dev/block/$disk print 2>/dev/null | grep "win" | grep ^$fw_windows_number | wc -l) == 1 ]] && {
+						windows_number=$fw_windows_number
+						break
+					}
+				}||{
+					echo Invalid number.
+					echo
+				}
+			done
+		}
+		[[ $windows_number -gt $critical_number && -n $windows_number ]] || {
+			echo "Windows partition number [$windows_number] is marked as dangerous to manage."
+			echo Reason: It is below critical partition $critical_number.
+			echo This tool will be closed to avoid any damage.
+			echo
+			exit
+		}
+		[[ $windows_number -gt $critical_number && -n $windows_number ]] && {
+			echo Formating Windows partition as NTFS...
+			echo "$linebar"
+			mkfs.ntfs -f /dev/block/$disk${TFP}$windows_number -L WIN${device_name} && {
+				echo "$linebar"
+				echo "     Done."
+			}||{
+				echo "$linebar"
+				echo "     Failed."
+				echo "     Reboot into recovery and try again."
+				pressanykeytocontinue
+			}
+		}||{
+			echo Could not format Windows partition.
+		}
+	}
+}
+
+format_esp(){
+	[[ $msc_status == 1 ]] && {
+		echo "Can not proceed with Mass Storage mode enabled."
+		echo "Disable it and try again."
+		return_main
+	}
+	[[ -z $canformatfat ]] && {
+		echo "Can not format ESP partition."
+		pressanykeytocontinue
+	}||{
+		esp_number=$1
+		[[ -z $esp_number ]] && esp_number=$(ls -l /dev/block/platform/soc/$storage/by-name | grep " esp " | awk '{print $NF}' | sed "s/\/dev\/block\/$disk//g" | sed 's/^p//g')
+		[[ -z $esp_number ]] && {
+			echo Could not find ESP partition number.
+			echo Please pick it from the list.
+			echo "$linebar"
+			echo "$(parted -s /dev/block/$disk print 2>/dev/null | grep "esp")"
+			echo "$linebar"
+			echo
+			while true; do
+				echo -n "Enter the number of ESP partition: " && read fe_esp_number
+				echo
+				echo
+				[[ $fe_esp_number =~ ^[0-9]+$ ]] && {
+					[[ $(parted -s /dev/block/$disk print 2>/dev/null | grep "esp" | grep ^$fe_esp_number | wc -l) == 1 ]] && {
+						esp_number=$fe_esp_number
+						break
+					}
+				}||{
+					echo Invalid number.
+					echo
+				}
+			done
+		}
+		[[ $esp_number -gt $critical_number && -n $esp_number ]] || {
+			echo "ESP partition number [$esp_number] is marked as dangerous to manage."
+			echo Reason: It is below critical partition $critical_number.
+			echo This tool will be closed to avoid any damage.
+			echo
+			exit
+		}
+		[[ $esp_number -gt $critical_number && -n $esp_number ]] && {
+			echo Formating ESP partition as FAT32...
+			sleep 1s
+			echo "$linebar"
+			mkfs.fat -F32 -s1 /dev/block/$disk${TFP}$esp_number -n ESP${device_name} && {
+				echo "$linebar"
+				echo "     Done."
+			}||{
+				echo "$linebar"
+				echo "     Failed."
+				echo "     Reboot into recovery and try again."
+				pressanykeytocontinue
+			}
+		}||{
+			echo Could not format ESP partition.
+		}
+	}
+}
+
+format_pe(){
+	[[ $msc_status == 1 ]] && {
+		echo "Can not proceed with Mass Storage mode enabled."
+		echo "Disable it and try again."
+		return_main
+	}
+	[[ -z $canformatfat ]] && {
+		echo "Can not format Windows PE partition."
+		pressanykeytocontinue
+	}||{
+		pe_number=$1
+		[[ -z $pe_number ]] && pe_number=$(ls -l /dev/block/platform/soc/$storage/by-name | grep " winpe " | awk '{print $NF}' | sed "s/\/dev\/block\/$disk//g" | sed 's/^p//g')
+		[[ -z $pe_number ]] && {
+			echo Could not find Windows PE partition number.
+			echo Please pick it from the list.
+			echo "$linebar"
+			echo "$(parted -s /dev/block/$disk print 2>/dev/null | grep "pe")"
+			echo "$linebar"
+			echo
+			while true; do
+				echo -n "Enter the number of Windows PE partition: " && read fw_pe_number
+				echo
+				echo
+				[[ $fw_pe_number =~ ^[0-9]+$ ]] && {
+					[[ $(parted -s /dev/block/$disk print 2>/dev/null | grep "pe" | grep ^$fw_pe_number | wc -l) == 1 ]] && {
+						pe_number=$fw_pe_number
+						break
+					}
+				}||{
+					echo Invalid number.
+					pressanykeytocontinue
+				}
+			done
+		}
+		[[ $pe_number -gt $critical_number ]] || {
+			echo "Windows PE partition number [$pe_number] is marked as dangerous to manage."
+			echo Reason: It is below critical partition $critical_number.
+			echo This tool will be closed to avoid any damage.
+			echo
+			exit
+		}
+		[[ $pe_number -gt $critical_number && -n $pe_number ]] && {
+			echo Formating ESP partition as FAT32...
+			sleep 1s
+			echo "$linebar"
+			mkfs.fat -F32 -s1 /dev/block/$disk${TFP}$pe_number -n WINPE${device_name} && {
+				echo "$linebar"
+				echo "     Done."
+			}||{
+				echo "$linebar"
+				echo "     Failed."
+				echo "     Reboot into recovery and use format partitions menu."
+				pressanykeytocontinue
+			}
+		}||{
+			echo Could not format Windows PE partition.
+		}
+	}
+}
+
+bytes2human(){
+	local i=${1:-0} d="" s=0 S=("Bytes" "KiB" "MiB" "GiB" "TiB" "PiB" "EiB" "YiB" "ZiB")
+	while ((i > 1024 && s < ${#S[@]}-1)); do
+		printf -v d ".%02d" $(( i % 1024 * 100 / 1024 ))
+		i=$(( i / 1024 ))
+		s=$(( s + 1 ))
+	done
+	echo "$i$d ${S[$s]}"
+}
+
+gib2bytes() {
+	echo $(awk -v var="$1" 'BEGIN {result = int(var * 1024 * 1024 * 1024); print result}')
+}
+
+bytes2sector(){
+	bytes=$1
+	echo $(awk "BEGIN {printf \"%d\", ($bytes + $sector_size_b / 2) / $sector_size_b}")
+}
+
+umount_partition(){
+	umountplus(){
+		partition_name=$1
+		echo Checking for $partition_name mount point...
+		[[ $partition_name == userdata ]] && mount_name=data || mount_name=$partition_name
+		[[ $(mount | grep $disk | awk '{print $3}' | grep $mount_name | wc -l) == 0 ]] && {
+			echo "     Nothing was found."
+		}||{
+			point=$(mount | grep $disk | awk '{print $3}' | grep $mount_name)
+			echo
+			echo Umounting $point...
+			echo "$linebar"
+			umount -lf $point || {
+				echo "$linebar"
+				echo "     Failed on umounting $point"
+				echo "     Umount it manually and try again."
+				return_main
+			} && {
+				reboot=1
+				echo "$linebar"
+				echo "     Done."
+			}
+		}
+		[[ -e /dev/block/mapper/$partition_name ]] && {
+			echo
+			echo Removing $partition_name from mapped devices...
+			dmsetup remove -f $partition_name || {
+				echo "     Failed on removing $path from mapped devices."
+				echo "     Umount it manually and try again."
+				return_main
+			} && {
+				echo "     $path removed mapped devices!"
+			}
+		}
+		echo
+	}
+
+	case $1 in
+		userdata|sdcard)
+			umountplus userdata
+			umountplus sdcard
+		;;
+		*)
+			umountplus $1
+		;;
+	esac
+}
+
+remove_win_esp(){
+	unset reboot
+	echo R. Remove Windows and ESP partitions
+	echo
+	echo
+	[[ ! $sector_size_b =~ ^[0-9]+$ || -z $sector_size_b || $sector_size_b -lt 512 ]] && {
+		echo "Sector size [$sector_size_b] is a invalid number."
+		echo "Can not proceed this way."
+		return_main
+	}
+	[[ $msc_status == 1 ]] && {
+		echo "Can not proceed with Mass Storage mode enabled."
+		echo "Disable it and try again."
+		return_main
+	}
+
+	[[ $lastpartition_number -gt $critical_number ]] && {
+		echo Found some partitions to remove.
+		echo
+		echo -n "Do you want to confirm them by looking at partition table? (y/n): " && read -n 1 user_input
+		echo
+		# if user type anything isn't n/N, then show partition table
+		[[ $user_input =~ ^[nN]$ ]] && {
+			echo
+			echo Okay. Listing them...
+		}||{
+			parted -s /dev/block/$disk print free 2>/dev/null
+			echo
+			echo
+			echo -n "Is there any partition ahead partition $critical_number to remove? (y/n): " && read -n 1 user_confirm
+			echo
+			# if user type anything isn't y/Y, then leave
+			[[ $user_confirm =~ ^[yY]$ ]] || {
+				echo
+				echo Okay then. No partitions to remove.
+				return_main
+			}
+		}
+		while [[ $lastpartition_number -gt $critical_number ]]; do
+			while true; do
+				echo
+				partition_name=$(parted -s /dev/block/$disk print 2>/dev/null | grep ^$lastpartition_number | awk '{print $5}')
+				[[ $partition_name =~ ^(ext2|ext4|f2fs|exfat|ntfs|fat32|fat16)$ ]] && partition_name=$(parted -s /dev/block/$disk print 2>/dev/null | grep ^$lastpartition_number | awk '{print $6}')
+				echo "$linebar"
+				echo "Partition name  : $partition_name"
+				echo "Partition number: $lastpartition_number"
+				echo "$linebar"
+				echo -n "Do you want to remove it? (y/n): " && read -n 1 user_input
+				echo
+				echo
+				[[ $user_input =~ ^[yYnN]$ ]] && break
+			done
+			[[ $user_input =~ ^[nN]$ ]] && return_main
+			[[ $partition_name =~ ^(win|esp|userdata)$ ]] || {
+				while true; do
+					echo "Unexpected partition: $partition_name"
+					echo -n "Are you really sure about removing it? (y/n): " && read -n 1 user_input
+					echo
+					echo
+					[[ $user_input =~ ^[yYnN]$ ]] && break
+				done
+				[[ $user_input =~ ^[nN]$ ]] && return_main
+			}
+			umount_partition $partition_name
+			echo Removing partition: $lastpartition_number. $partition_name...
+			[[ $lastpartition_number -gt $critical_number ]] && {
+				parted -s /dev/block/$disk rm $lastpartition_number 2>/dev/null || {
+					echo "     Failed on removing $partition_name."
+					echo "     Try to remove it manually."
+					return_main
+				} && {
+					echo "     Done."
+				}
+			}||{
+				echo "     Can not remove $i because it is less or equal to the critical number $critical_number."
+				echo "     No partition was touched."
+				return_main
+			}
+			(( lastpartition_number-- ))
+		done
+		echo
+		echo
+		echo Partitions removed successfully!
+	}||{
+		echo Could not find any partition to remove.
+	}
+	echo
+	echo
+	[[ $(parted -s /dev/block/$disk print 2>/dev/null | grep userdata | wc -l) == 0 && $(parted -s /dev/block/$disk unit B print free 2>/dev/null | grep "." | tail -1 | awk '{print $3}' | sed 's/B//g') -gt 8388608 ]] && {
+		while true; do
+			echo -n "Do you want to create userdata partition with whole space left? (y/n): " && read -n 1 user_input
+			echo
+			[[ $user_input =~ ^[yYnN]$ ]] && break
+		done
+		echo
+		[[ $user_input =~ ^[nN]$ ]] && return_main
+
+		userdata_start=$(parted -s /dev/block/$disk unit s print free 2>/dev/null | grep "Free Space" | tail -n 1 | awk '{print $1}')
+
+		# Align
+		[[ $(( $userdata_start % $PSAN )) == 0 ]] || userdata_start=$(( $userdata_start + $PSAN - ( $userdata_start % $PSAN ) ))
+
+		userdata_end=$(parted -s /dev/block/$disk unit s print free 2>/dev/null | grep "Free Space" | tail -n 1 | awk '{print $2}')
+		echo Creating userdata as ext4...
+		echo "$linebar"
+		parted -s /dev/block/$disk mkpart userdata ext4 $userdata_start $userdata_end && {
+			reboot=1
+			(( lastpartition_number++ ))
+			[[ -e /dev/block/platform/soc/$storage/by-name/userdata ]] || ln -s /dev/block/$disk${TFP}$lastpartition_number /dev/block/platform/soc/$storage/by-name/userdata > /dev/null 2>&1
+			echo "$linebar"
+			echo "     Done."
+			echo "userdata current size is: $(parted -s /dev/block/$disk unit GiB print free 2>/dev/null | grep " userdata" | awk '{print $4}')"
+			echo
+			format_userdata
+		}||{
+			echo "$linebar"
+			echo "     Failed."
+			echo "     The error must be described just above."
+			fix_range
+			[[ $user_fixrange =~ ^[yY]$ ]] && {
+				echo Creating userdata as ext4...
+				echo "$linebar"
+				parted -s /dev/block/$disk mkpart userdata ext4 $userdata_start $new_sector"s" && {
+					reboot=1
+					echo "$linebar"
+					echo "     Done."
+					(( lastpartition_number++ ))
+					[[ -e /dev/block/platform/soc/$storage/by-name/userdata ]] || ln -s /dev/block/$disk${TFP}$lastpartition_number /dev/block/platform/soc/$storage/by-name/userdata > /dev/null 2>&1
+				}||{
+					echo "$linebar"
+					echo "     Failed."
+					echo "     The error must be described just above."
+				}
+			}
+			echo
+			echo
+		}
+	}
+	[[ -n $reboot ]] && {
+		echo -n "Do you want to check the current $disk partition table? (y/n): " && read -n 1 user_input
+		echo
+		[[ $user_input =~ ^[nN]$ ]] || {
+			parted -s /dev/block/$disk print free 2>/dev/null
+			pressanykeytocontinue
+		}
+		echo
+		echo Restarting the recovery mode is required.
+		echo
+		echo -n Press any key to reboot into recovery... && read -n1
+		reboot recovery
+	}||{
+		return_main
+	}
+	return_main
+}
+
+create_partitions(){
+	echo C. Create partitions
+	echo
+	echo
+	[[ ! $sector_size_b =~ ^[0-9]+$ || -z $sector_size_b || $sector_size_b -lt 512 ]] && {
+		echo "Sector size [$sector_size_b] is a invalid number."
+		echo "Can not proceed this way."
+		return_main
+	}
+	[[ -e /dev/block/platform/soc/$storage/by-name/win || -e /dev/block/platform/soc/$storage/by-name/esp ]] && {
+		echo "Windows and/or ESP partitions already exist."
+		echo Use P option on main page.
+		return_main
+	}
+	[[ $msc_status == 1 ]] && {
+		echo "Can not proceed with Mass Storage mode enabled."
+		echo "Disable it and try again."
+		return_main
+	}
+	[[ $lastpartition_number != $userdata_number && $has_userdata == 1 ]] && {
+		echo It seems userdata is not the last partition in $disk disk.
+		echo Can not proceed this way.
+		return_main
+	}
+
+	[[ $has_userdata == 1 ]] && {
+		userdata_line=$(parted -s /dev/block/$disk print free 2>/dev/null | grep -n " userdata" | sed 's/:.*//')
+		free_line=$(parted -s /dev/block/$disk print free 2>/dev/null | grep -n "Free Space" | sed 's/:.*//' | tail -1)
+		[[ $free_line -gt $userdata_line ]] && {
+			echo There is the following amount of free space after userdata partition: $(bytes2human $(parted -s /dev/block/$disk unit B print free 2>/dev/null | sed -n "$free_line p" | awk '{print $3}' | sed 's/B//g'))
+			while true; do
+				echo -n "Do you want to return to main page and use M option to remove and recreate userdata taking the whole free space? (y/n) :" && read -n1 user_input
+				echo
+				[[ $user_input =~ ^[yYnN]$ ]] && break
+			done
+			[[ $user_input =~ ^[yY]$ ]] && {
+				main
+				exit
+			}
+		}
+	}
+
+	[[ $has_userdata == 1 ]] && {
+		windows_number=$(( $userdata_number + 1 ))
+		esp_number=$(( $userdata_number + 2 ))
+	}||{
+		windows_number=$(( $critical_number + 1 ))
+		esp_number=$(( $critical_number + 2 ))
+	}
+
+	[[ $has_userdata == 1 ]] && {
+		userdata_info_b=$(parted -s /dev/block/$disk unit B print 2>/dev/null | grep " userdata")
+		userdata_info_s=$(parted -s /dev/block/$disk unit s print 2>/dev/null | grep " userdata")
+		userdata_size_b=$(echo $userdata_info_b | awk '{print $4}' | sed 's/B//g')
+		windows_max=$(( $userdata_size_b - $userdata_min - $esp_size_b ))
+	}||{
+		# Since there is no userdata partition to work, check if the last element on partition table is a free space and if it's bigger than 22 GB
+		[[ $(parted -s /dev/block/$disk unit B print free 2>/dev/null | grep "." | tail -1 | grep "Free Space" | wc -l) == 0 ]] && {
+			[[ $(parted -s /dev/block/$disk unit B print free 2>/dev/null | grep "." | tail -1 | awk '{print $3}' | sed 's/B//g') -lt 23622320128 ]] && {
+				echo There is no enough free space for creating  Windows partitions.
+				return_main
+			}
+		}
+		windows_max=$(parted -s /dev/block/$disk unit B print free 2>/dev/null | grep "." | tail -1 | grep "Free Space" | awk '{print $3}' | sed 's/B//g')
+		windows_max=$(( $windows_max - $userdata_min - $esp_size_b ))
+	}
+
+	clear
+	echo C. Create partitions
+	echo
+	echo
+	echo You are about to repartition your device $disk disk.
+	echo
+	[[ $has_userdata == 1 ]] && {
+		echo Current userdata partition size is: $(bytes2human $userdata_size_b)
+	}||{
+		echo In the end of partition table there is a free space with the size: $(bytes2human $windows_max)
+	}
+	echo
+	echo With that you can use the following range for Windows:
+	echo
+	echo Min: $(bytes2human windows_min) "(recommended  size)"
+	echo Max: $(bytes2human windows_max) "(no more than this)"
+	echo
+	[[ $has_userdata == 1 ]] && echo "It is recommended at least 5 GiB for userdata in order to let Android usable." && echo
+	while true; do
+		echo -n "So, how many GiB do you want to give to your Windows partition (e.g., 123.45): " && read user_input
+		echo
+		echo
+		[[ -z $user_input ]] && {
+			main
+			exit
+		}
+		[[ $user_input =~ ^[0-9]+(\.[0-9]+)?$ ]] && {
+			windows_size_b=$(gib2bytes $user_input)
+			[[ $windows_size_b -gt $windows_max ]] && {
+				echo Windows size is bigger than the maximum value.
+				return_main
+			}||{
+				break
+			}
+		}||{
+			echo "Invalid input. Please enter a valid GiB value like 123.45."
+			sleep 2
+		}
+	done
+
+	windows_size_s=$(bytes2sector $windows_size_b)
+
+	[[ $has_userdata == 1 ]] && {
+		userdata_start_b=$(echo $userdata_info_b | awk '{print $2}' | sed 's/B//g')
+		userdata_start_s=$(echo $userdata_info_s | awk '{print $2}' | sed 's/s//g')
+
+		userdata_end_b=$(echo $userdata_info_b | awk '{print $3}' | sed 's/B//g')
+		userdata_end_s=$(echo $userdata_info_s | awk '{print $3}' | sed 's/s//g')
+
+		userdata_new_size_b=$(( $userdata_size_b - $windows_size_b - $esp_size_b ))
+		userdata_new_size_s=$(bytes2sector $userdata_new_size_b)
+
+		userdata_new_end_b=$(( $userdata_start_b + $userdata_new_size_b ))
+		userdata_new_end_s=$(( $userdata_start_s + $userdata_new_size_s ))
+
+		windows_start_b=$(( $userdata_new_end_b + 1 ))
+		windows_start_s=$(( $userdata_new_end_s + 1 ))
+
+		esp_end_b=$userdata_end_b
+		esp_end_s=$userdata_end_s
+	}||{
+		critical_start_b=$(parted -s /dev/block/$disk unit B print 2>/dev/null | grep "." | tail -1 | awk '{print $2}' | sed 's/B//g')
+		critical_start_s=$(parted -s /dev/block/$disk unit s print 2>/dev/null | grep "." | tail -1 | awk '{print $2}' | sed 's/s//g')
+
+		critical_end_b=$(parted -s /dev/block/$disk unit B print 2>/dev/null | grep "." | tail -1 | awk '{print $3}' | sed 's/B//g')
+		critical_end_s=$(parted -s /dev/block/$disk unit s print 2>/dev/null | grep "." | tail -1 | awk '{print $3}' | sed 's/s//g')
+
+		critical_size_b=$(parted -s /dev/block/$disk unit B print 2>/dev/null | grep "." | tail -1 | awk '{print $4}' | sed 's/B//g')
+		critical_size_s=$(parted -s /dev/block/$disk unit s print 2>/dev/null | grep "." | tail -1 | awk '{print $4}' | sed 's/s//g')
+
+		windows_start_b=$(( $critical_end_b + 1 ))
+		windows_start_s=$(( $critical_end_s + 1 ))
+
+		esp_end_b=$(parted -s /dev/block/$disk unit B print free 2>/dev/null | grep "." | tail -1 | awk '{print $2}' | sed 's/B//g') # The last sector
+		esp_end_s=$(parted -s /dev/block/$disk unit s print free 2>/dev/null | grep "." | tail -1 | awk '{print $2}' | sed 's/s//g') # The last sector
+	}
+
+	windows_end_b=$(( $windows_start_b + $windows_size_b ))
+	windows_end_s=$(( $windows_start_s + $windows_size_s ))
+
+	esp_start_b=$(( $windows_end_b + 1 ))
+	esp_start_s=$(( $windows_end_s + 1 ))
+
+	# Align
+	[[ $(( $windows_start_s % $PSAN )) == 0 ]] || windows_start_s=$(( $windows_start_s + $PSAN - ( $windows_start_s % $PSAN ) ))
+	[[ $(( $esp_start_s % $PSAN )) == 0 ]] || esp_start_s=$(( $esp_start_s + $PSAN - ( $esp_start_s % $PSAN ) ))
+
+	windows_end_s=$(( $esp_start_s - 1 ))
+	windows_size_s=$(( $windows_end_s - $windows_start_s ))
+	
+	windows_start_b=$(( $windows_start_s * $sector_size_b ))
+	windows_end_b=$(( $windows_end_s * $sector_size_b ))
+	windows_size_b=$(( $windows_end_b - $windows_start_b ))
+
+	esp_start_b=$(( $esp_start_s * $sector_size_b ))
+	esp_size_b=$(( $esp_end_b - $esp_start_b ))
+	#####################################
+
+	clear
+	echo C. Create partitions
+	echo
+	echo
+	echo "You chose: $user_input GiB"
+	[[ $windows_size_b -lt $windows_min ]] && echo -n "\nThe chosen Windows partition size is smaller than the minimum value which is 27 GiB.\nYou have been warned.\n\n"
+	[[ $has_userdata == 1 ]] && echo This way your new userdata size will be: $(bytes2human $userdata_new_size_b)
+	echo
+	echo "The new layout will be (GiB):"
+	echo "          Num    Start        End       Length"
+	[[ $has_userdata == 1 ]] && {
+		echo Userdata: $userdata_number - $(bytes2human $userdata_start_b) - $(bytes2human $userdata_new_end_b) - $(bytes2human $userdata_new_size_b)
+	}||{
+		echo DontTouch: $critical_number - $(bytes2human $critical_start_b) - $(bytes2human $critical_end_b) - $(bytes2human $critical_size_b)
+	}
+	echo Windows : $windows_number - $(bytes2human $windows_start_b) - $(bytes2human $windows_end_b) - $(bytes2human $windows_size_b)
+	echo "ESP     : $esp_number - $(bytes2human $esp_start_b) - $(bytes2human $esp_end_b) - $(bytes2human $esp_size_b)"
+	echo "End     : $(bytes2human $esp_end_b)"
+	echo
+	echo
+	echo Do you want to apply these changes?
+	echo -n "If so, enter yes: " && read user_input
+	echo
+	echo
+	[[ $user_input != yes ]] && {
+		echo No changes were applied.
+		return_main
+	}
+
+	# Detects how many partitions the table fits and check if ESP is bigger than that. If so, resizing partition table is required
+	[[ $esp_number -gt $max_partitions ]] && {
+		[[ $esp_number -gt 32 ]] && max_partitions_new=64
+		[[ $esp_number -gt 64 ]] && max_partitions_new=128
+		echo
+		echo "Current $disk partition table fits up to $max_partitions partitions."
+		echo "In order to proceed, we need to expand this limit to $max_partitions_new."
+		echo "Do you want to proceed?"
+		echo -n "If so, enter yes: " && read resize_table
+		[[ $resize_table != yes ]] && return_main
+		echo
+		echo "$linebar"
+		sgdisk --resize-table $max_partitions_new /dev/block/$disk
+		echo "$linebar"
+		[[ $max_partitions == $(sgdisk --print /dev/block/$disk | grep "Partition table holds up to" | sed 's/[^0-9]//g') ]] && {
+			echo "Failed on resizing $disk partition table."
+			echo "The error may be described above."
+			echo "Can not proceed this way."
+			echo "Please, report this to: t.me/AdrianoA3"
+			return_main
+		}
+	}
+
+	# Delete and recreate userdata only if it already existed
+	[[ $has_userdata == 1 ]] && {
+		umount_partition userdata
+		echo Removing userdata from /dev/block/$disk...
+		[[ $userdata_number -gt $critical_number ]] && {
+			echo "$linebar"
+			parted -s /dev/block/$disk rm $userdata_number && {
+				echo "$linebar"
+				echo "     Done."
+			}||{
+				echo "$linebar"
+				echo "     Could not remove userdata partition from $disk."
+				echo "     The error must be described just above."
+				echo "     Can not proceed this way."
+				return_main
+			}
+		}||{
+			echo "     Can not remove userdata because it before partition $critical_number."
+			echo "     No partition was touched."
+			return_main
+		}
+
+		echo
+		echo Creating userdata as a EXT4 partition from $(bytes2human $userdata_start) to $(bytes2human $userdata_new_end)...
+		echo "$linebar"
+		parted -s /dev/block/$disk mkpart userdata ext4 $userdata_start_s"s" $userdata_new_end_s"s" && {
+			echo "$linebar"
+			echo "     Done."
+			echo
+			[[ -e /dev/block/platform/soc/$storage/by-name/userdata ]] || ln -s /dev/block/$disk${TFP}$userdata_number /dev/block/platform/soc/$storage/by-name/userdata > /dev/null 2>&1
+		}||{
+			echo "$linebar"
+			echo "     Could not create userdata partition."
+			echo "     The error must be described just above."
+			echo "     Can not proceed this way."
+			return_main
+		}
+		echo
+	}
+
+	echo Creating Windows as a NTFS partition from $(bytes2human $windows_start_b) to $(bytes2human $windows_end_b)...
+	echo "$linebar"
+	parted -s /dev/block/$disk mkpart win ntfs $windows_start_s"s" $windows_end_s"s" && {
+		echo "$linebar"
+		echo "     Done."
+		[[ -e /dev/block/platform/soc/$storage/by-name/win ]] || ln -s /dev/block/$disk${TFP}$windows_number /dev/block/platform/soc/$storage/by-name/win > /dev/null 2>&1
+	}||{
+		echo "$linebar"
+		echo "     Could not create Windows partition."
+		echo "     The error must be described just above."
+		echo "     Can not proceed this way."
+		return_main
+	}
+
+	echo
+	echo Creating ESP as a FAT32 partition from $(bytes2human $esp_start_b) to $(bytes2human $esp_end_b)...
+	echo "$linebar"
+	parted -s /dev/block/$disk mkpart esp fat32 $esp_start_s"s" $esp_end_s"s" && {
+		echo "$linebar"
+		echo "     Done."
+		[[ -e /dev/block/platform/soc/$storage/by-name/esp ]] || ln -s /dev/block/$disk${TFP}$esp_number /dev/block/platform/soc/$storage/by-name/esp > /dev/null 2>&1
+	}||{
+		echo "$linebar"
+		echo "     Could not create ESP partition."
+		echo "     The error must be described just above."
+		fix_range
+		[[ $user_fixrange =~ ^[yY]$ ]] && {
+			echo Creating ESP as a FAT32 partition...
+			echo "$linebar"
+			parted -s /dev/block/$disk mkpart esp fat32 $esp_start_s"s" $new_sector"s" && {
+				echo "$linebar"
+				echo "     Done."
+				[[ -e /dev/block/platform/soc/$storage/by-name/esp ]] || ln -s /dev/block/$disk${TFP}$esp_number /dev/block/platform/soc/$storage/by-name/esp > /dev/null 2>&1
+			}||{
+				echo "$linebar"
+				echo "     Failed."
+				echo "     The error must be described just above."
+				echo "     Can not proceed this way."
+				return_main
+			}
+		}
+	}
+
+	echo
+	echo Setting ESP flag for ESP partition...
+	echo "$linebar"
+	parted -s /dev/block/$disk set $esp_number esp on && {
+		echo "$linebar"
+		echo "     Done."
+	}||{
+		echo "$linebar"
+		echo "     Could not set ESP flag."
+		echo "     The error must be described just above."
+		pressanykeytocontinue
+	}
+
+	[[ $has_userdata == 1 ]] && {
+		format_userdata
+	}
+	echo
+	format_windows
+	echo
+	format_esp
+
+	echo
+	echo Done.
+	echo -n "Do you want to check the partition table? (y/n): " && read -n 1 user_input
+	echo
+	[[ $user_input =~ ^[yY]$ ]] && {
+		parted -s /dev/block/$disk print free 2>/dev/null
+		pressanykeytocontinue
+	}
+
+	echo
+	echo Restarting the recovery mode is required.
+	echo
+	echo -n Press any key to reboot into recovery... && read -n 1
+	reboot recovery
+}
+
+msc(){
+	usb_controller=$(getprop ro.boot.usbcontroller)
+	[[ -z $usb_controller ]] && usb_controller=$(getprop sys.usb.controller)
+	[[ -z $usb_controller ]] && {
+		echo "Could not locate the device usb controller."
+		echo "Can not switch Mass Storage mode this way."
+	}||{
+		setenforce 0
+		[[ $msc_status = 0 || -n $1 ]] && {
+			msc_script=$(cat <<IHATESM660
+echo 0xEF > /config/usb_gadget/g1/bDeviceClass
+echo 0x02 > /config/usb_gadget/g1/bDeviceSubClass
+echo 0x01 > /config/usb_gadget/g1/bDeviceProtocol
+ln -s /config/usb_gadget/g1/functions/mass_storage.0/ /config/usb_gadget/g1/configs/b.1/ > /dev/null 2>&1
+echo /dev/block/$disk > /config/usb_gadget/g1/configs/b.1/mass_storage.0/lun.0/file
+echo 0 > /config/usb_gadget/g1/configs/b.1/mass_storage.0/lun.0/removable
+sh -c 'echo > /config/usb_gadget/g1/UDC; echo $usb_controller > /config/usb_gadget/g1/UDC' &
+IHATESM660
+)
+			echo "$msc_script" > /sbin/msc
+			chmod 777 /sbin/msc
+			/sbin/msc
+			[[ -n $1 ]] && exit
+			clear
+			echo "U. Enable Mass Storage mode"
+			echo
+			echo
+			echo USB Mass Storage mode enabled successfully!
+		}||{
+			echo 0x00 > /config/usb_gadget/g1/bDeviceClass
+			echo 0x00 > /config/usb_gadget/g1/bDeviceSubClass
+			echo 0x00 > /config/usb_gadget/g1/bDeviceProtocol
+			echo> /config/usb_gadget/g1/functions/mass_storage.0/lun.0/file
+			echo 1 > /config/usb_gadget/g1/functions/mass_storage.0/lun.0/removable
+			toybox unlink /config/usb_gadget/g1/configs/b.1/mass_storage.0
+			echo U. Disable Mass Storage mode
+			echo
+			echo
+			echo USB Mass Storage mode disabled successfully!
+		}
+	}
+	return_main
+}
+
+return_main(){
+	echo
+	echo -n Press any key to return to main page && read -n 1
+	main
+	exit
+}
+
+format_partitions(){
+	echo F. Format partitions
+	echo
+	echo
+	echo B. Format both Windows and ESP partitions
+	echo W. Format Windows partition only
+	echo E. Format ESP partition only
+	echo P. Format Windows PE partition only
+	echo
+	echo ?. Back to main page
+	echo -n "Choose: " && read -n 1 user_input
+	echo
+	[[ $user_input =~ ^[bB]$ ]] && list="Windows and ESP partitions"
+	[[ $user_input =~ ^[wW]$ ]] && list="Windows partition"
+	[[ $user_input =~ ^[eE]$ ]] && list="ESP partition"
+	[[ $user_input =~ ^[bBwWeE]$ ]] || {
+		main
+		exit
+	}
+	echo
+	echo "Are you sure you want to format $list?"
+	echo -n "Enter yes to proceed: " && read areusure
+	echo
+	[[ $areusure != "yes" ]] && return_main
+	echo
+	case "$user_input" in
+		b|B)
+			format_windows
+			echo
+			format_esp
+		;;
+		w|W)
+			format_windows
+		;;
+		e|E)
+			format_esp
+		;;
+		p|P)
+			format_pe
+		;;
+	esac
+	return_main
+}
+
+backup_table(){
+	disk_size=$(parted -s /dev/block/$disk print 2>/dev/null | grep "Disk /" | awk '{print $3}' | sed 's/\./ /g' | awk '{print $1}' | sed 's/[^0-9]//g')
+	[[ $disk_size -gt 50 ]] && storage_size=64GB
+	[[ $disk_size -gt 100 ]] && storage_size=128GB
+	[[ $disk_size -gt 200 ]] && storage_size=256GB
+	[[ $disk_size -gt 400 ]] && storage_size=512GB
+	[[ $disk_size -gt 800 ]] && storage_size=1TB
+
+	echo B. "Backup $disk table"
+	echo
+	echo
+	echo M. Get gpt_main0.bin
+	echo B. Get gpt_both0.bin
+	echo Z. Get both
+	echo
+	echo -n "Choose: " && read -n1 user_input
+	echo
+	echo
+	[[ $user_input =~ ^[mMbBzZ]$ ]] || {
+		main
+		exit
+	}
+	path=/sdcard
+	[[ -w $path ]] || path=/cache
+	[[ -w $path ]] || {
+		echo Could not find an output path for the backup.
+		while true; do
+			echo
+			echo -n "Please enter a valid path or x to exit: " && read path
+			echo
+			[[ $path =~ ^[xX]$ ]] && {
+				return_main
+				break
+			}
+			[[ -w $path ]] && {
+				break
+			}||{
+				echo $path does not exist or is not writable
+			}
+		done
+	}
+	
+	unset status
+	[[ $(parted -s /dev/block/$disk print 2>/dev/null | grep " win" | wc -l) == 1 ]] && status="$status"_win
+	[[ $(parted -s /dev/block/$disk print 2>/dev/null | grep " esp" | wc -l) == 1 ]] && status="$status"_esp
+	[[ $(parted -s /dev/block/$disk print 2>/dev/null | grep " linux" | wc -l) == 1 ]] && status="$status"_linux
+	[[ -z $status ]] && status=_stock
+	
+	[[ -z $TFP ]] && {
+		count=6
+	}||{
+		count=34
+	}
+
+	delete_files(){
+		rm -rf $path/gpt_main0.bin
+		rm -rf $path/gpt_backup0_wrong.bin
+		rm -rf $path/gpt_backup0_part1.bin
+		rm -rf $path/gpt_backup0_part2.bin
+		rm -rf $path/gpt_backup0_part3.bin
+		rm -rf $path/gpt_backup0.bin
+	}
+
+	gptmain0(){
+		unset gptmainfailed
+		gptmain=$path/gpt_main0_${device_name}-${storage_size}${status}.bin
+		echo Getting gpt_main.bin from $disk...
+		dd if=/dev/block/$disk of=$gptmain bs=$sector_size_b count=$count > /dev/null 2>&1 && {
+			echo "└─── Done."
+		}||{
+			echo "└─── Failed."
+			[[ $user_input =~ ^[mM]$ ]] && {
+				unset gptmainfailed
+				rm -rf $gptmain
+				return_main
+			}||{
+				gptmainfailed=1
+			}
+		}
+		echo
+	}
+
+	gptboth0(){
+		unset gptbothfailed
+		gptboth=$path/gpt_both0_${device_name}-${storage_size}${status}.bin
+		echo Getting gpt_both0.bin from $disk...
+		total_sectors=$(parted -s /dev/block/$disk unit s print 2>/dev/null | grep "Disk /" | awk '{print $3}' | sed 's/s//g')
+		echo "├─── Reading gpt_main0.bin..."
+
+		dd if=/dev/block/$disk of=$path/gpt_main0.bin bs=$sector_size_b count=$count > /dev/null 2>&1 && {
+			echo "│    └─── Done."
+		}||{
+			echo "└────┴─── Failed."
+			delete_files
+			[[ $user_input =~ ^[zZ]$ ]] && {
+				gptbothfailed=1
+				return
+			}||{
+				echo
+				echo gpt_main0.bin is needed to generate gpt_both0.bin.
+				return_main
+			}
+		}
+		echo "├─── Reading gpt_backup0.bin..."
+		echo "│    ├─── Getting gpt_backup0.bin..."
+		dd if=/dev/block/$disk of=$path/gpt_backup0.bin bs=$sector_size_b skip=$(( $total_sectors - $count + 1 )) > /dev/null 2>&1 && {
+			echo "│    │    └─── Done."
+		}||{
+			echo "└─────────┴─── Failed."
+			delete_files
+			[[ $user_input =~ ^[zZ]$ ]] && {
+				gptbothfailed=1
+				return
+			}||{
+				echo
+				echo gpt_backup0.bin is needed to generate gpt_both0.bin.
+				return_main
+			}
+		}
+		echo "│    ├─── Merging gpt_main0.bin and gpt_backup0.bin to gpt_both0.bin..."
+		cat $path/gpt_main0.bin $path/gpt_backup0.bin > $gptboth
+#		[[ $(stat -c %s $gptboth) == $(( ( $count*2 - 1 ) * $sector_size_b )) ]] &&  {
+		[[ -e $gptboth && $(ls -la $gptboth | awk '{print $5}') == $(( ( $count*2 - 1 ) * $sector_size_b )) ]] &&  {
+			echo "│    │    └─── Done."
+		}||{
+			echo "└─────────┴─── Failed."
+			delete_files
+			[[ $user_input =~ ^[zZ]$ ]] && {
+				gptbothfailed=1
+				return
+			}||{
+				echo
+				echo Could not merge gpt_main0.bin and gpt_backup0.bin.
+				return_main
+			}
+		}
+		echo "│    └─── Done."
+		echo "└─── Done."
+		delete_files
+	}
+
+	[[ $user_input =~ ^[mM]$ ]] && {
+		gptmain0
+		echo
+		echo Open a new CMD/Powershell window and paste the following line to copy the output file into Desktop.
+		echo Select the command, CTRL+C to copy and right click to paste it on window.
+		echo
+		echo "$linebar"
+		echo "adb pull $gptmain %USERPROFILE%\Desktop"
+		echo "$linebar"
+		echo
+		echo "In order to restore the current partition layout, you can use:"
+		echo "fastboot flash partition:0 $(basename $gptmain)"
+	}
+	[[ $user_input =~ ^[bB]$ ]] && {
+		gptboth0
+		echo
+		echo Open a new CMD/Powershell window and paste the following line to copy the output file into Desktop.
+		echo Select the command, CTRL+C to copy and right click to paste it on window.
+		echo
+		echo "$linebar"
+		echo "adb pull $gptboth %USERPROFILE%\Desktop"
+		echo "$linebar"
+		echo
+		echo "In order to restore the current partition layout, you can use:"
+		echo "fastboot flash partition:0 $(basename $gptboth)"
+	}
+	[[ $user_input =~ ^[zZ]$ ]] && {
+		gptmain0
+		gptboth0
+		echo
+		[[ -z $gptbothfailed && -z $gptmainfailed ]] && {
+			echo Open a new CMD/Powershell window and paste the following lines to copy the output files into Desktop.
+			echo Select the commands, CTRL+C to copy and right click to paste them on window.
+			echo
+			echo "$linebar"
+			echo "adb pull $gptmain %USERPROFILE%\Desktop"
+			echo "adb pull $gptboth %USERPROFILE%\Desktop"
+			echo "$linebar"
+			echo
+			echo "In order to restore the current partition layout, you can use:"
+			echo "fastboot flash partition:0 $(basename $gptmain)"
+		}
+		[[ -n $gptbothfailed && -z $gptmainfailed ]] && {
+			echo Open a new CMD/Powershell window and paste the following line to copy the output file into Desktop.
+			echo Select the command, CTRL+C to copy and right click to paste it on window.
+			echo
+			echo "$linebar"
+			echo "adb pull $gptmain %USERPROFILE%\Desktop"
+			echo "$linebar"
+			echo
+			echo "In order to restore the current partition layout, you can use:"
+			echo "fastboot flash partition:0 $(basename $gptmain)"
+		}
+		[[ -z $gptbothfailed && -n $gptmainfailed ]] && {
+			echo Open a new CMD/Powershell window and paste the following line to copy the output file into Desktop.
+			echo Select the command, CTRL+C to copy and right click to paste it on window.
+			echo
+			echo "$linebar"
+			echo "adb pull $gptboth %USERPROFILE%\Desktop"
+			echo "$linebar"
+			echo
+			echo "In order to restore the current partition layout, you can use:"
+			echo "fastboot flash partition:0 $(basename $gptboth)"
+		}
+	}
+	return_main
+}
+
+fix_range(){
+	echo
+	while true; do
+		echo "If the error above is about wrong sector range, it is possible to fix it."
+		echo "DuckPart uses sectors as a unit of measurement when creating partitions because this way errors are less common, but they can still occur."
+		echo -n "Do you want to fix it now? (y/n): " && read -n1 user_fixrange
+		echo
+		[[ $user_fixrange =~ ^[yYnN]$ ]] && break
+	done
+	echo
+	[[ $user_fixrange =~ ^[yY]$ ]] && {
+		echo "$linebar"
+		echo "Okay then."
+		echo "You might be seeing something like:"
+		echo "$dotbar"
+		echo "Error: You requested a partition from 1611MB to 59.1GB (sectors 393216..14417917)."
+		echo "The closest location we can manage is 1611MB to 59.1GB (sectors 393216..14417914)."
+		echo "$dotbar"
+		echo "This was just an example. Keep that in mind."
+		echo "What you need to enter is just the last number of the last line (14417914 in the example), or just q to quit."
+		echo
+		while true; do
+			echo -n "Enter the number: " && read new_sector
+			echo
+			[[ $new_sector =~ ^[qQ]$ ]] && {
+				main
+				exit
+			}
+			[[ $new_sector =~ ^[0-9]+$ ]] && {
+				fix_range=1
+				break
+			}
+			echo Invalid input.
+		done
+	}
+}
+
+manual_partitioning(){
+	unset user_input new_part_name new_part_fs new_part_size user_confirm mp_part_number new_part_start_b new_part_start_s new_part_max_b new_part_size_b new_part_end_s new_part_size_s new_part_end_b new_part_end_s part_number success
+
+	while true; do
+		clear
+		parted -s /dev/block/$disk print free 2>/dev/null
+		echo
+		echo C. Create a new partition
+		echo R. Remove a partition
+		echo E. Exit
+		echo
+		echo -n "Choose: " && read -n 1 user_input
+		echo
+		echo
+		[[ $user_input =~ ^[cCrReE]$ ]] && break
+	done
+	case $user_input in
+		e|E) 
+			main
+			exit
+		;;
+		c|C)
+			[[ $(( $lastpartition_number + 1 )) -gt $max_partitions ]] && {
+				echo In order to create a new partition, you need to resize your $disk table.
+				while true; do
+					echo -n "Do you want to proceed? (y/n): " && read -n 1 user_rsz
+					echo
+					[[ $user_rsz =~ ^[yYnN]$ ]] && break
+				done
+				[[ $user_rsz =~ ^[nN]$ ]] && {
+					manual_partitioning
+					exit
+				}
+				[[ $max_partitions -le 32 ]] && max_partitions_new=64
+				[[ $max_partitions -le 64 ]] && max_partitions_new=128
+				echo "$linebar"
+				sgdisk --resize-table $max_partitions_new /dev/block/$disk
+				echo "$linebar"
+				[[ $max_partitions == $(sgdisk --print /dev/block/$disk | grep "Partition table holds up to" | sed 's/[^0-9]//g') ]] && {
+					echo "     Failed."
+					echo "     The error may be described above."
+					echo
+					echo "Can not proceed this way."
+					echo "Please, report this to: t.me/AdrianoA3"
+					pressanykeytocontinue
+					manual_partitioning
+					exit
+				}
+			}
+
+			[[ -z $(parted -s /dev/block/$disk print free 2>/dev/null | grep "." | tail -1 | grep "Free Space") ]] && {
+				echo There is no free space in the end of partition table to create a new partition.
+				echo Remove the last partition and try again.
+			}||{
+				echo "$linebar"
+				echo
+				while true; do
+					echo W. Windows
+					echo E. ESP
+					echo P. Windows PE
+					echo L. Linux
+					echo U. Userdata
+					echo
+					echo -n "Choose the partition to create: " && read -n 1 part_opt
+					echo
+					[[ $part_opt =~ ^[wWeEpPlLuU]$ ]] && break || echo Invalid input.
+				done
+				echo
+				case $part_opt in
+					w|W)
+						new_part_name=win
+						new_part_fs=ntfs
+					;;
+					e|E)
+						new_part_name=esp
+						new_part_fs=fat32
+					;;
+					p|P)
+						new_part_name=winpe
+						new_part_fs=fat32
+					;;
+					l|L)
+						new_part_name=linux
+						new_part_fs=ext4
+					;;
+					u|U)
+						new_part_name=userdata
+						new_part_fs=ext4
+					;;
+				esac
+				[[ -e /dev/block/platform/soc/$storage/by-name/$new_part_name ]] && {
+					echo The partition $new_part_name already exists.
+					echo Can not proceed this way.
+					pressanykeytocontinue
+					manual_partitioning
+					exit
+				}
+
+				new_part_start_s=$(parted -s /dev/block/$disk unit s print free 2>/dev/null | grep "." | tail -1 | awk '{print $1}' | sed 's/s//g')
+
+				# Align
+				[[ $(( $new_part_start_s % $PSAN )) == 0 ]] || new_part_start_s=$(( $new_part_start_s + $PSAN - ( $new_part_start_s % $PSAN ) ))
+
+				new_part_max_b=$(parted -s /dev/block/$disk unit b print free 2>/dev/null | grep "." | tail -1 | awk '{print $3}' | sed 's/B//g')
+				echo "$linebar"
+				echo
+				while true; do
+					echo $new_part_name max size is: $(bytes2human new_part_max_b)
+					echo
+					[[ $part_opt =~ ^[eE]$ ]] && echo "Recommended size for ESP is ~300 MiB (0.3 GiB)" && echo
+					echo Enter the partition size in GiB, only numbers and dot,
+					echo -n "or all to use all space: " && read new_part_size
+					echo
+					[[ $(echo $(bytes2human $new_part_max_b) | sed 's/[^0-9.]*//g') == $(echo $new_part_size | awk -F'.' '{sub(/[0]+$/, "", $2); print}') ]] && new_part_size=all
+					[[ $new_part_size == all ]] && break
+
+					new_part_size_b=$(gib2bytes $new_part_size)
+					[[ $new_part_size_b -gt $new_part_max_b ]] && {
+						echo Partition size is bigger than the maximum value.
+						pressanykeytocontinue
+					}||{
+						[[ $new_part_size =~ ^[0-9]+(\.[0-9]+)?$ ]] && break
+					}
+				done
+				echo "$linebar"
+				echo
+				[[ $new_part_size == all ]] && {
+					new_part_end_s=$(parted -s /dev/block/$disk unit s print free 2>/dev/null | grep "." | tail -1 | awk '{print $2}' | sed 's/s//g')
+				}||{
+					new_part_size_s=$(bytes2sector $new_part_size_b)
+					new_part_end_s=$(( $new_part_start_s + $new_part_size_s ))
+					# Align
+					[[ $(( ( $new_part_end_s + 1 ) % $PSAN )) == 0 ]] || new_part_end_s=$(( $new_part_end_s + $PSAN - ( $new_part_end_s % $PSAN ) - 1 ))
+				}
+
+				echo Partition name: $new_part_name
+				echo Partition type: $new_part_fs
+				echo Partition size: $(bytes2human $(( ( $new_part_end_s - $new_part_start_s ) * $sector_size_b )))
+
+				echo
+				echo Do you want to create this partition?
+				echo -n "If so, enter yes: " && read user_confirm
+				echo
+				echo
+				[[ $user_confirm == yes ]] && {
+					echo "$linebar"
+					echo
+					echo Creating $new_part_name...
+					echo "$linebar"
+					parted -s /dev/block/$disk mkpart $new_part_name $new_part_fs $new_part_start_s"s" $new_part_end_s"s" && {
+						echo "$linebar"
+						echo "     Done."
+						(( lastpartition_number++ ))
+						[[ -e /dev/block/platform/soc/$storage/by-name/$new_part_name ]] || ln -s /dev/block/$disk${TFP}$lastpartition_number /dev/block/platform/soc/$storage/by-name/$new_part_name > /dev/null 2>&1
+						success=1
+					}||{
+						echo "$linebar"
+						echo "     Failed."
+						echo "     The error must be described just above."
+						fix_range
+						[[ $user_fixrange =~ ^[yY]$ ]] && {
+							echo Creating $new_part_name...
+							echo "$linebar"
+							parted -s /dev/block/$disk mkpart $new_part_name $new_part_fs $new_part_start_s"s" $new_sector"s" && {
+								echo "$linebar"
+								echo "     Done."
+								(( lastpartition_number++ ))
+								[[ -e /dev/block/platform/soc/$storage/by-name/$new_part_name ]] || ln -s /dev/block/$disk${TFP}$lastpartition_number /dev/block/platform/soc/$storage/by-name/$new_part_name > /dev/null 2>&1
+								success=1
+							}||{
+								echo "$linebar"
+								echo "     Failed."
+								echo "     The error must be described just above."
+							}
+						}
+					}
+				}||{
+					echo No partition was created.
+				}
+			}
+			[[ $success == 1 ]] && {
+				echo
+				part_number=$lastpartition_number
+				[[ $part_number -gt $critical_number && -n $part_number ]] || {
+					echo "$new_part_name partition number [$part_number] is marked as dangerous to manage."
+					echo Reason: It is below critical partition $critical_number.
+					echo This tool will be closed to avoid any damage.
+					echo
+					exit
+				}
+				echo "$linebar"
+				echo
+				echo Formatting $new_part_name...
+				echo
+				case $part_opt in
+					u|U)
+						format_userdata
+					;;
+
+					w|W)
+						format_windows
+					;;
+
+					e|E)
+						echo Setting ESP flag for ESP partition...
+						echo "$linebar"
+						parted -s /dev/block/$disk set $part_number esp on && {
+							echo "$linebar"
+							echo "     Done."
+						}||{
+							echo "$linebar"
+							echo "     Could not set ESP flag."
+							echo "     The error must be described just above."
+							pressanykeytocontinue
+						}
+						echo
+						format_esp
+					;;
+
+					p|P)
+						format_pe
+					;;
+					l|L)
+						format_linux
+					;;
+					*)
+						manual_partitioning
+						exit
+					;;
+				esac
+			}
+		;;
+		r|R)
+			while true; do
+				echo "$linebar"
+				echo -n "Enter the partition name you want to remove or x to exit: " && read part_name
+				echo
+				[[ $part_name =~ ^[[:alnum:]]+$ ]] && {
+					[[ $part_name =~ ^[xX]$ ]] && {
+						manual_partitioning
+						exit
+					}
+					[[ -e /dev/block/platform/soc/$storage/by-name/$part_name ]] && {
+						break
+					}||{
+						echo Partition $part_name does not exist.
+						echo If it exists, reboot recovery and try again.
+					}
+				}||{
+					echo Invalid input.
+				}
+			done
+			part_number=$(ls -l /dev/block/platform/soc/$storage/by-name | grep " $part_name " | awk '{print $NF}' | sed "s/\/dev\/block\/$disk//g" | sed 's/^p//g')
+			[[ -z $part_number ]] && {
+				echo Could not find $part_name partition number.
+				echo Please pick it from the list.
+				echo "$linebar"
+				echo "$(parted -s /dev/block/$disk print 2>/dev/null | grep " $part_name")"
+				echo "$linebar"
+				echo
+				while true; do
+					echo -n "Enter the number of $part_name partition: " && read mp_part_number
+					echo
+					echo
+					[[ $mp_part_number =~ ^[0-9]+$ ]] && {
+						[[ $(parted -s /dev/block/$disk print 2>/dev/null | grep " $part_name" | grep ^$mp_part_number | wc -l) == 1 ]] && {
+							part_number=$mp_part_number
+							break
+						}
+					}||{
+						echo Invalid number.
+						echo
+					}
+				done
+			}
+			[[ $part_number -gt $critical_number && -n $part_number ]] || {
+				echo "$linebar"
+				echo "$part_name partition number [$part_number] is marked as dangerous to manage."
+				echo Reason: It is below critical partition $critical_number.
+				echo
+				echo
+				echo Are you pretty sure about removing $part_name?
+				echo -n "If so, enter removeitnow: " && read user_omfg
+				echo
+				[[ $user_omfg != removeitnow ]] && {
+					echo "$linebar"
+					echo Well done.
+					return_main
+					exit
+				}||{
+					echo "$linebar"
+					echo Even so, you have to confirm again.
+				}
+
+			}
+			echo "$linebar"
+			echo
+			echo "Partition name  : $part_name"
+			echo "Partition number: $part_number"
+			echo Are you really sure about removing $part_name?
+			echo -n "If so, enter yes: " && read user_confirm
+			echo
+			echo
+			[[ $user_confirm == yes ]] && {
+				echo "$linebar"
+				echo
+				umount_partition $part_name
+				echo "$linebar"
+				echo
+				echo Removing $part_name...
+				echo "$linebar"
+				parted -s /dev/block/$disk rm $part_number && {
+					echo "$linebar"
+					echo "     Done."
+					(( lastpartition_number-- ))
+				}||{
+					echo "$linebar"
+					echo "     Failed."
+					echo "     The error must be described just above."
+				}
+			}||{
+				echo No partition was removed.
+			}
+		;;
+	esac
+	pressanykeytocontinue
+	manual_partitioning
+}
+
+dump_partitions(){
+	UBOX="( )"
+	SBOX="(x)"
+	selected=1
+	list=$(parted -s /dev/block/$disk print 2>/dev/null | grep "." | sed -n '1,/Number/!p' | sed 's/ext4//g ; s/ext2//g ; s/fat32//g ; s/fat16//g ; s/ntfs//g' | awk '{print $1". "$5" ("$4")"}' | sed "s/^/$UBOX /g")
+	max=$(echo "$list" | wc -l)
+	sizes=$(parted -s /dev/block/$disk unit b print 2>/dev/null | grep "." | sed -n '1,/Number/!p' | sed 's/ext4//g ; s/ext2//g ; s/fat32//g ; s/fat16//g ; s/ntfs//g ; s/B//g' | awk '{print $4}')
+	total_size=0
+	while true; do
+		clear
+		echo echo D. Dump $disk partitions
+		echo
+		echo
+		echo "$list"
+		echo
+		echo Total dump size: $(bytes2human $total_size)
+		total_size_kb=$(( $total_size / 1024 ))
+		line=1
+		unset path
+		for free_space_kb in $(df | sed -n '1! p' | awk 'NF >= 5' | awk '{print $(NF-2)}'); do
+			(( line++ ))
+			[[ $free_space_kb -ge $total_size_kb && $free_space_kb =~ ^[0-9]+$ ]] && {
+				path="$(df | sed -n "$line p" | awk 'NF >= 5' | awk '{print $6}') $path"
+			}
+		done
+		[[ -n "$path" ]] && {
+			[[ $total_size == 0 ]] || echo Can be dumped on: $path
+		}||{
+			echo There is no place for dumping partitions.
+		}
+
+		echo
+		echo "You can choose (for example):"
+		echo "    9: select partition 9"
+		echo "  1-9: select partitions from 1 to 9"
+		echo "    p: proceed for dumping"
+		echo "    r: return to main"
+		echo
+		echo -n "Enter: " && read user_input
+		echo
+		[[ $user_input =~ ^[0-9]+$ ]] && {
+			size=$(echo "$sizes" | sed -n "$user_input p")
+			[[ $(echo "$list" | sed -n "$user_input p" | sed -n "/$SBOX/ p" | wc -l) == 1 ]] && {
+				list=$(echo "$list" | sed -e "${user_input} s/$SBOX/$UBOX/g")
+				total_size=$(( $total_size - $size ))
+			}||{
+				list=$(echo "$list" | sed -e "${user_input} s/$UBOX/$SBOX/g")
+				total_size=$(( $total_size + $size ))
+			}
+		}
+		[[ $user_input =~ ^[0-9]+-[0-9]+$ ]] && {
+			echo
+			a=$(echo $user_input | sed 's/-/ /g' | awk '{print $1}')
+			b=$(echo $user_input | sed 's/-/ /g' | awk '{print $2}')
+			[[ $a != $b ]] && {
+				[[ $a -gt $b ]] && {
+					first=$b
+					last=$a
+				}||{
+					first=$a
+					last=$b
+				}
+				[[ $last -gt $max ]] && last=$max
+				echo Selecting partitions from $first to $last
+				echo
+
+				while [[ $first -le $last ]]; do
+					charloadnumber=$(( $first * ( $terminal_columns - 10 ) / $last ))
+					charblanknumber=$(( ( $terminal_columns - 10 ) - $charloadnumber ))
+					percentage=$(( 100 * $first / $last ))
+					echo -ne "\r[${loadbar:0:$charloadnumber}${blankbar:0:$charblanknumber}] $percentage%"
+
+					size=$(echo "$sizes" | sed -n "$first p")
+					[[ $(echo "$list" | sed -n "$first p" | sed -n "/$SBOX/ p" | wc -l) == 1 ]] && {
+						list=$(echo "$list" | sed -e "${first} s/$SBOX/$UBOX/g")
+						total_size=$(( $total_size - $size ))
+					}||{
+						list=$(echo "$list" | sed -e "${first} s/$UBOX/$SBOX/g")
+						total_size=$(( $total_size + $size ))
+					}
+					(( first++ ))
+				done
+			}
+		}
+		[[ $user_input =~ ^[rR]$ ]] && {
+			main
+			exit
+		}
+		[[ $user_input =~ ^[pP]$ ]] && {
+			[[ $total_size == 0 ]] && {
+				echo Select at least one partition.
+				sleep 2
+			}||{
+				[[ -n "$path" ]] && {
+					break
+				}||{
+					echo "Dump size is too big for available path(s)."
+					sleep 2
+				}
+			}
+		}
+	done
+	line=1
+	path=$(echo $path | sed 's/ $//g')
+	while [[ -z $output ]]; do
+		[[ $(echo $path | awk '{print NF}') == 1 ]] && {
+			output=$path
+		}||{
+			echo "$linebar"
+			echo
+			echo "Available path(s)"
+			echo
+			for option in $path; do
+				echo $line. $option
+				(( line++ ))
+			done
+			echo
+			while true; do
+				echo -n "Enter the number of output path: " && read user_input
+				echo
+				[[ $user_input =~ ^[0-9]+$ && $user_input -gt 0 && $user_input -le $line ]] && break
+			done
+			output=$(echo $path | awk -v col="$user_input" '{print $col}')
+		}
+	done
+	output_dir=$output
+	output_name=${device_name}_DUMP_$(echo "$disk" | tr '[:lower:]' '[:upper:]')
+	output=$output/$output_name
+	rm -rf $output > /dev/null 2>&1
+	mkdir $output
+	unset done
+	status_done="[ DONE ]"
+	status_failed="[FAILED]"
+	status_wait="[ WAIT ]"
+	for number in $(echo "$list" | grep "$SBOX" | sed 's/\.//g' | awk '{print $2}'); do
+		name=$(echo "$list" | grep " $number. " | awk '{print $3}')
+		[[ $number -lt 10 ]] && {
+			string="(0$number/$(echo "$list" | grep "$SBOX" | wc -l)) - Dumping $name..."
+		}||{
+			string="($number/$(echo "$list" | grep "$SBOX" | wc -l)) - Dumping $name..."
+		}
+		stringlen=${#string}
+		echo -ne "$string"
+		dd if=/dev/block/$disk${TFP}$number of=$output/$name.bin > /dev/null 2>&1 & pid=$!
+		unset num
+		while [[ -e /proc/$pid ]]; do
+			((num++))
+			sleep .3
+			echo -ne "\r$string${dotbar:0:num}${blankbar:0:$(( $terminal_columns - $stringlen - $num - 8 ))}$status_wait"
+		done
+		echo -ne "\r$string${dotbar:0:$(( $terminal_columns - $stringlen - 8 ))}"
+		[[ -e $output/$name.bin ]] && {
+			echo $status_done
+		}||{
+			echo $status_failed
+		}
+	done
+	echo
+	[[ -n "$(find $output -mindepth 1)" ]] && {
+		echo Dump done.
+		echo
+		echo "$linebar"
+		echo
+		while true; do
+			echo -n "Do you want to zip the dump? (y/n): " && read -n1 user_input
+			echo
+			[[ $user_input =~ ^[yYnN]$ ]] && break
+		done
+		[[ $user_input =~ ^[yY]$ ]] && {
+			{
+				echo
+				zip -r ${output}.zip ${output}/
+				ret=$(pwd)
+				cd $output
+				sha256sum * > checksums.sha256
+				cd $ret
+				zip -ur ${output}.zip ${output}/checksums.sha256
+			} && {
+				echo
+				echo Done.
+				echo
+				while true; do
+					echo -n "As the zip process gone well, do you want to remove the output directory? (y/n): " && read -n1 user_input2
+					echo
+					[[ $user_input2 =~ ^[yYnN]$ ]] && echo && break
+				done
+				[[ $user_input2 =~ ^[yY]$ ]] && rm -rf $output > /dev/null 2>&1
+				echo Open a new CMD/Powershell window and paste the following line to copy output dump directory into Desktop
+				echo Select the command, CTRL+C to copy and right click to paste it on window
+				echo
+				echo "$linebar"
+				echo "adb pull ${output}.zip %USERPROFILE%\Desktop"
+				echo "$linebar"
+				echo
+				while true; do
+					echo -n "Do you want to remove the zip now? (y/n): " && read -n1 user_input2
+					echo
+					[[ $user_input2 =~ ^[yYnN]$ ]] && break
+				done
+				[[ $user_input2 =~ ^[yY]$ ]] && rm -rf ${output}.zip > /dev/null 2>&1
+			}||{
+				echo Failed to zip the dump.
+				echo Even so you can get the output path.
+				echo
+				echo Open a new CMD/Powershell window and paste the following line to copy output dump directory into Desktop
+				echo Select the command, CTRL+C to copy and right click to paste it on window
+				echo
+				echo "$linebar"
+				echo "adb pull $output %USERPROFILE%\Desktop"
+				echo "$linebar"
+			}
+		}||{
+			echo
+			echo Open a new CMD/Powershell window and paste the following line to copy output dump directory into Desktop
+			echo Select the command, CTRL+C to copy and right click to paste it on window
+			echo
+			echo "$linebar"
+			echo "adb pull $output %USERPROFILE%\Desktop"
+			echo "$linebar"
+		}
+	}||{
+		echo No partitions were dumped.
+	}
+	return_main
+}
+
+date_ms(){
+	current_time=$(date +%s.%N)
+	echo ${current_time%.*}$((${current_time#*.} / 1000000))
+}
+
+main(){
+	unset critical_number emmc TFP
+	(( run++ ))
+	clear
+
+	echo 8 > /sbin/progress_s
+
+	# Get the width of terminal
+	terminal_columns=$(stty size | awk '{print $2}')
+	[[ $terminal_columns =~ ^[0-9]+$ ]] || terminal_columns=62
+	[[ $terminal_columns -lt 120 && $run == 1 ]] && {
+		echo This tool requires a bigger screen.
+		echo It is recommended run it through ADB on a PC.
+		echo If you are using a PC, try to maximize this window.
+		echo Current window size is: $(( $terminal_columns + 12 ))
+		echo
+		echo If you want to proceed, you may face UI faults that may lead you to bad choices.
+		echo Beware.
+		echo
+		echo -n "Even so, do you want to proceed? (y/n): " && read -n1 user_input
+		echo
+		[[ $user_input =~ ^[yY]$ ]] || {
+			echo
+			exit
+		}
+	}
+
+	# Progress bar stuff
+	charload="|"
+	charblank=" "
+	for i in $(seq 1 $terminal_columns); do
+		dotbar="${dotbar}."
+		loadbar="${loadbar}|"
+		blankbar="${blankbar} "
+		linebar="${linebar}─"
+	done
+	echo
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "                    ██████████            "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "                  ██░░░░░░░░░░██          "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "                ██░░░░░░░░░░░░░░██        "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "                ██░░░░░░░░████░░████████  "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "    ██          ██░░░░░░░░████░░██▒▒▒▒▒▒██"
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "  ██░░██        ██░░░░░░░░░░░░░░██▒▒▒▒▒▒██"
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "  ██░░░░██      ██░░░░░░░░░░░░░░████████  "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "██░░░░░░░░██      ██░░░░░░░░░░░░██        "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "██░░░░░░░░████████████░░░░░░░░██          "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "██░░░░░░░░██░░░░░░░░░░░░░░░░░░░░██        "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░██      "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░██      "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░██      "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░██        "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "  ██░░░░░░░░░░░░░░░░░░░░░░░░░░██          "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "    ██████░░░░░░░░░░░░░░░░████            "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 42/2 ))}" && echo "          ████████████████                "
+	echo
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 71/2 ))}" && echo "8888888b.                    888      8888888b.                  888   "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 71/2 ))}" && echo "888  \"Y88b                   888      888   Y88b                 888   "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 71/2 ))}" && echo "888    888                   888      888    888                 888   "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 71/2 ))}" && echo "888    888 888  888  .d8888b 888  888 888   d88P 8888b.  888d888 888888"
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 71/2 ))}" && echo "888    888 888  888 d88P\"    888 .88P 8888888P\"     \"88b 888P\"   888   "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 71/2 ))}" && echo "888    888 888  888 888      888888K  888       .d888888 888     888   "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 71/2 ))}" && echo "888  .d88P Y88b 888 Y88b.    888 \"88b 888       888  888 888     Y88b. "
+	echo -n "${blankbar:0:$(( $terminal_columns/2 - 71/2 ))}" && echo "8888888P\"   \"Y88888  \"Y8888P 888  888 888       \"Y888888 888      \"Y888 1.0"
+	echo
+# Run this block in a subshell and get its pid. This block shows a progress bar that ends just before main comes
+{
+	while true; do
+		charloadnumber=$(( $(cat /sbin/progress_s) * ( $terminal_columns - 8 ) / 100 )) # [+]+[ ]+[100%] = 7 chars + 1 = 8
+		charblanknumber=$(( ( $terminal_columns - 8 ) - charloadnumber ))
+		percentage=$(cat /sbin/progress_s)
+		echo -ne "\r[${loadbar:0:$charloadnumber}${blankbar:0:$charblanknumber}] $percentage%"
+	done
+} & pid=$!
+
+	# Get max partitions that fits on disk
+	max_partitions=$(sgdisk --print /dev/block/$disk | grep "Partition table holds up to" | sed 's/[^0-9]//g')
+	echo 16 > /sbin/progress_s
+
+	# The Fucking P of mmcblkN<<<<P>>>>>(partition number)
+	[[ $(echo $disk | grep mmc | wc -l) == 1 ]] && TFP=p || unset TFP
+	echo 2 > /sbin/progress_s
+
+	# Get the last partition number
+	sleep 0.5
+	lastpartition_number=$(parted -s /dev/block/$disk print 2>/dev/null | grep "." | awk '{print $1}' | tail -1)
+	echo 35 > /sbin/progress_s
+
+	# Get critical partition number, the partition limit to do not touch
+	lastpart_number=$lastpartition_number
+	minpartition_number=$(( $lastpartition_number - 4 ))
+	while [[ $lastpart_number -gt $minpartition_number ]]; do
+		partition_name=$(parted -s /dev/block/$disk print 2>/dev/null | grep ^$lastpart_number | awk '{print $5}')
+		[[ $partition_name =~ ^(ext2|ext4|exfat|ntfs|fat32|fat16)$ ]] && partition_name=$(parted -s /dev/block/$disk print 2>/dev/null | grep ^$lastpart_number | awk '{print $6}')
+		[[ $partition_name =~ ^(.*win.*|pe|esp|userdata|linux)$ ]] && {
+			(( lastpart_number-- ))
+		}||{
+			critical_number=$lastpart_number
+			break
+		}
+	done
+	echo 64 > /sbin/progress_s
+
+	# If script can get critical number, ask user to enter it
+	[[ -z $critical_number ]] && {
+		clear
+		echo WARNING!
+		echo
+		echo
+		echo This tool uses a partition as a limit to avoid touching it or any other partition below it.
+		echo This limit could not be found in this device.
+		echo This limit is required to proceed.
+		echo Choose with caution.
+		while true; do
+			echo -n "Do you want to select manually a partition to use as limit? (y/n): " && read -n 1 user_input
+			echo
+			echo
+			[[ $user_input =~ ^[yYnN]$ ]] && break
+		done
+		echo
+		[[ $user_input =~ ^[nN]$ ]] && exit
+		while true; do
+			parted -s /dev/block/$disk print 2>/dev/null
+			echo
+			echo -n "Enter a partition name to use as limit: " && read user_input
+			echo
+			echo
+			[[ $(parted -s /dev/block/$disk print 2>/dev/null | grep " $user_input" | wc -l) == 1 ]] && {
+				crtical_number=$(parted -s /dev/block/$disk print 2>/dev/null | grep " $user_input" | awk '{print $1}')
+				echo Are you sure about using $user_input partition as limit
+				echo -n "If so, enter yes: " && read user_yes
+				[[ $user_yes == yes ]] || exit
+				break
+			}
+		done
+	}
+	echo 68 > /sbin/progress_s
+
+	# Check if there is userdata partition
+	[[ -e /dev/block/platform/soc/$storage/by-name/userdata ]] && {
+		has_userdata=1
+		userdata_number=$(parted -s /dev/block/$disk print 2>/dev/null | grep " userdata" | awk '{print $1}')
+		[[ $userdata_number == $lastpartition_number ]] || userdata_not_last=1
+	}||{
+		has_userdata=0
+	}
+	echo 78 > /sbin/progress_s
+
+	# Get userdata partition disk
+	[[ -z $disk ]] && {
+		echo
+		echo "Could not find the disk where userdata is located."
+		echo "Can not proceed this way."
+		echo "Reboot and try again."
+		echo "If this persists, report this to: t.me/AdrianoA3"
+		echo
+		exit
+	}
+	echo 82 > /sbin/progress_s
+
+	# Get logical sector size
+	sector_size_b=$(parted -s /dev/block/$disk print 2>/dev/null | grep "Sector size" | sed 's/Sector size (logical\/physical): //g ; s/B\/.*//g')
+	echo 92 > /sbin/progress_s
+
+	# Get Mass Storage Mode status
+	[[ -e /config/usb_gadget/g1/configs/b.1/mass_storage.0 ]] && msc_status=1 || msc_status=0
+	echo 100 > /sbin/progress_s
+	sleep 0.2
+
+	kill $pid > /dev/null 2>&1
+	rm /sbin/progress_s > /dev/null 2>&1
+	[[ $msc_status == 1 ]] && msc_main=Disable || msc_main=Enable
+	while true; do
+		clear
+		echo "${blankbar:0:$(( $terminal_columns/2 - 36/2))}Welcome to DuckPart Tool 1.0"
+		echo
+		echo
+		echo Working disk: /dev/block/$disk
+		[[ -e /sys/devices/platform/soc/$storage/health_descriptor/life_time_estimation_a ]] && cat /sys/devices/platform/soc/$storage/health_descriptor/life_time_estimation_a > /dev/null 2>&1 && {
+			case $(cat /sys/devices/platform/soc/$storage/health_descriptor/life_time_estimation_a) in
+				"0x01") health="100-90 %" ;;
+				"0x02") health="90-80 %" ;;
+				"0x03") health="80-70 %" ;;
+				"0x04") health="70-60 %" ;;
+				"0x05") health="60-50 ℅" ;;
+				"0x06") health="50-40 ℅" ;;
+				"0x07") health="40-30 ℅" ;;
+				"0x08") health="30-20 ℅" ;;
+				"0x09") health="30-20 ℅" ;;
+				"0x0A") health="20-10 ℅" ;;
+				"0x0b") health="10-0 ℅" ;;
+			esac
+			echo Storage health: $health
+		}
+		echo
+		echo
+		echo First time here? You may like to check
+		echo "├─ B. Backup $disk table"
+		echo "├─ D. Dump $disk partitions"
+		echo "└─ S. Show current $disk partition table"
+		echo
+		echo
+		echo Ready to go? Make it happen
+		echo "├─ C. Create Windows and ESP partitions"
+		echo "├─ F. Format partitions"
+		echo "├─ R. Remove Windows and ESP partitions"
+		echo "├─ U. $msc_main USB Mass Storage mode (USB will be reconnected)"
+		echo "├─ M. Manual partitioning"
+		echo "└─ G. Why GiB instead GB?"
+		echo
+		echo
+		echo E. Exit
+		echo
+		echo -n "Choose: " && read -n 1 input_main
+		clear
+		case $input_main in
+			c|C)
+				create_partitions
+			;;
+			f|F)
+				format_partitions
+			;;
+			r|R)
+				remove_win_esp
+			;;
+			u|U)
+				msc
+			;;
+			b|B)
+				backup_table
+			;;
+			m|M)
+				manual_partitioning
+			;;
+			s|S)
+				parted -s /dev/block/$disk print free 2>/dev/null
+				echo
+				return_main
+			;;
+			g|G)
+				echo G. Why GiB instead GB?
+				echo
+				echo
+				echo This tool uses the binary system of data units prefixes.
+				echo "As KB/MB/GB is part of the decimal system of prefixes, it is factor of 1,000 and may not represent sizes maybe you'd expect."
+				echo For example:
+				echo 1 KB = 1000 bytes
+				echo 1 KiB = 1024 bytes
+				echo "This way, if you'd choose 50 GB, the real Windows partition size would be about 46,5 GiB."
+				return_main
+			;;
+			d|D)
+				dump_partitions
+			;;
+			e|E)
+				exit
+			;;
+		esac
+	done
+	return_main
+}
+
+[[ $1 == msc ]] && {
+	msc 1 && exit 0 || exit 1
+}
+main
