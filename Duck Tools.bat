@@ -26,6 +26,64 @@ if not exist Files (
 	pause
 	exit
 )
+adb > nul 2>&1 || (
+	set "miss_pkg=adb"
+)
+fastboot > nul 2>&1 || (
+	if "!miss_pkg"!=="" (
+		set "miss_pkg=fastboot"
+	)
+)
+if not "!miss_pkg"!=="" (
+	echo Error.
+	echo.
+	echo !miss_pkg!.exe is missing.
+	echo.
+	echo D. Go to 15 Seconds Adb installer download page
+	echo S. Select adb.exe directory
+	echo E. Exit
+	echo.
+	echo|set /p="Choose: " & choice /c dse /n
+	if !errorlevel!==1 (
+		start https://androidmtk.com/download-15-seconds-adb-installer
+		echo.
+		pause
+		exit
+	) else if !errorlevel!==2 (
+		:PICK_ADB
+		for /f "delims=" %%A in ('powershell -Command "& {Add-Type -AssemblyName System.Windows.Forms; $openFileDialog = New-Object System.Windows.Forms.OpenFileDialog; $openFileDialog.Filter = '|!miss_pkg!.exe'; $openFileDialog.Title = 'Select !miss_pkg!.exe'; $openFileDialog.InitialDirectory = '!DIR!'; $openFileDialog.ShowDialog() | Out-Null; $openFileDialog.FileName}"') do set "ADB_DIR=%%~dpA"
+		echo.
+		if not exist "!ADB_DIR!" (
+			echo|set /p="Do you want to try again? [y/n]: " & choice /c yn /n
+			if !errorlevel!==1 (
+				goto PICK_ADB
+			) else (
+				exit
+			)
+		)
+		set "PATH=!PATH!;!ADB_DIR!"
+		echo|set /p="Do you want to add such path into PATH environment variable? [y/n]: " & choice /c yn /n
+		if !errorlevel!==1 (
+			for /f "tokens=2,*" %%A in ('reg query "HKLM\System\CurrentControlSet\Control\Session Manager\Environment" /v Path ^| find /i "Path"') do (
+				set "reg_path=%%B;!ADB_DIR!"
+			)
+			echo.
+			echo Adding !miss_pkg! path into PATH...
+			reg add "HKLM\System\CurrentControlSet\Control\Session Manager\Environment" /f /v Path /t REG_SZ /d "!reg_path!\">nul 2>&1&& (
+				echo      Done.
+				echo      Since you keep !miss_pkg! binary in this same path, you will not be prompet about it.
+				echo      This change will take effect in the next logon.
+			) || (
+				echo      Failed.
+			)
+			echo.
+			pause
+		)
+	) else if !errorlevel!==3 (
+		exit
+	)
+)
+
 
 call :MAIN
 exit
