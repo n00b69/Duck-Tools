@@ -63,7 +63,7 @@ adb version > nul 2>&1 || (
 			echo Adding adb path into PATH...
 			reg add "HKLM\System\CurrentControlSet\Control\Session Manager\Environment" /f /v Path /t REG_SZ /d "!reg_path!\">nul 2>&1&& (
 				echo      Done.
-				echo      Since you keep adb binary in this same path, you will not be prompet about it.
+				echo      Since you keep adb binary in this same path, you will not be prompted about it.
 				echo      This change will take effect in the next logon.
 			) || (
 				echo      Failed.
@@ -439,7 +439,7 @@ goto :EOF
 		call :MAIN
 	)
 
-	:WIM_FILE_SELECTION
+	:IMAGE_FILE_SELECTION
 	cls
 	echo ^> D. Deploy Windows image ^(.img or .esd^)
 	echo.
@@ -452,23 +452,18 @@ goto :EOF
 	echo.
 	pause
 
-	for /f "delims=" %%I in ('powershell -Command "& {Add-Type -AssemblyName System.Windows.Forms; $openFileDialog = New-Object System.Windows.Forms.OpenFileDialog; $openFileDialog.Filter = 'Windows Imaging Format (.wim; .esd)|*.wim;*.esd'; $openFileDialog.Title = 'Select a image file'; $openFileDialog.InitialDirectory = '!DIR!'; $openFileDialog.ShowDialog() | Out-Null; $openFileDialog.FileName}"') do set "WIMFILE=%%I"
+	for /f "delims=" %%a in ('powershell -Command "& {Add-Type -AssemblyName System.Windows.Forms; $openFileDialog = New-Object System.Windows.Forms.OpenFileDialog; $openFileDialog.Filter = 'Windows Imaging Format (.wim; .esd; .iso)|*.wim;*.esd;*.iso'; $openFileDialog.Title = 'Select a image file'; $openFileDialog.InitialDirectory = '!DIR!'; $openFileDialog.ShowDialog() | Out-Null; $openFileDialog.FileName}"') do set "WIMFILE=%%a"
 	if not exist "!WIMFILE!" (
 		echo.
 		echo It seems you didn't select any file.
+		:ASK_IMG_SEL
 		echo.
 		echo|set /p="Do you want to try again? [y/n]: " & choice /c yn /n
-		if "!errorlevel!"=="2" (
-			echo.
-			echo Okay then.
-			echo See you later.
-			echo.
-			pause
+		if !errorlevel!==2 (
 			call :MAIN
 		)
-		goto WIM_FILE_SELECTION
+		goto IMAGE_FILE_SELECTION
 	)
-
 	cls
 	echo ^> D. Deploy Windows image ^(.img or .esd^)
 	echo.
@@ -477,6 +472,26 @@ goto :EOF
 	echo Step 3 - Select an image:             WAITING
 	echo.
 	echo.
+	if /i "!WIMFILE:~-3!"=="iso" (
+		set INSTALL_WIM=sources\install.wim
+		7z l !WIMFILE! | findstr /C:"!INSTALL_WIM!" > nul 2>&1 || (
+			echo Invalid iso.
+			goto ASK_IMG_SEL
+		)
+		echo.
+		echo Extracting install.wim file from iso file...
+		7z e !WIMFILE! !INSTALL_WIM! -o!DIR! > nul 2>&1 && (
+			echo     Done.
+			echo.
+			echo.
+			set WIMFILE=install.wim
+			set INDEX=1
+			timeout 2 /nobreak > nul 2>&1
+		) || (
+			echo      Failed.
+			goto ASK_IMG_SEL
+		)
+	)
 	echo Listing Windows versions index...
 	echo.
 	dism /Get-WimInfo /WimFile:"!WIMFILE!"
@@ -523,6 +538,7 @@ goto :EOF
 		msg * Windows deployment failed.
 		echo.
 		pause
+		if exist install.wim del install.wim > nul 2>&1
 		call :MAIN
 	)
 
@@ -536,6 +552,7 @@ goto :EOF
 		echo      Check the screen.
 		echo.
 		pause
+		if exist install.wim del install.wim > nul 2>&1
 		call :MAIN
 	)
 
@@ -768,6 +785,7 @@ REM	Recovery capabilities
 	echo That^'s all.
 	echo.
 	pause
+	if exist install.wim del install.wim > nul 2>&1
 	call :MAIN
 goto :EOF
 
