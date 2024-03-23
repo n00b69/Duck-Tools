@@ -88,7 +88,7 @@ exit
 	echo.
 	echo.
 	echo P. Patch recovery ^(Orange Fox recommended^)
-	echo D. Deploy Windows image ^(.img or .esd^)
+	echo D. Deploy Windows image ^(.img, .iso or .esd^)
 	echo S. Send DuckPart files to current recovery
 	echo R. Run DuckPart
 	echo G. Get Windows image
@@ -168,14 +168,14 @@ goto :EOF
 	set INDEXES=0
 	set "INDEXLIST="
 	cls
-	echo ^> D. Deploy Windows image ^(.img or .esd^)
+	echo ^> D. Deploy Windows image ^(.img, .iso or .esd^)
 	echo.
 	echo.
 	echo|set /p="Do you want to put device in Mass Storage mode? [y/n]: " & choice /c yn /n
 	if !errorlevel! == 1 (
 		call :CONNECT_RECOVERY
 		cls
-		echo ^> D. Deploy Windows image ^(.img or .esd^)
+		echo ^> D. Deploy Windows image ^(.img, .iso or .esd^)
 		echo.
 		echo.
 		adb shell ls /sbin/duckpart > nul 2>&1 || (
@@ -213,7 +213,7 @@ goto :EOF
 	echo Step 3 - Select an image:             WAITING
 	echo.
 	echo.
-	
+
 	:: Get PC Windows drive letter
 	for /F "skip=1 tokens=2 delims==:" %%a in ('wmic os get "SystemDrive" /value') do set "HOSTDRIVE=%%a"
 
@@ -225,7 +225,7 @@ goto :EOF
 		pause
 		call :MAIN
 	)
-	
+
 	:: Open Computer screen to help use get drive letters
 	explorer ::{20D04FE0-3AEA-1069-A2D8-08002B30309D}
 
@@ -317,12 +317,34 @@ goto :EOF
 	:: Check Win drive letter chose by user is empty
 	dir !WINDRIVE!:\* >nul 2>&1 && (
 		echo.
-		echo Device Windows drive !WINDRIVE!: is not empty.
-		echo Can not proceed this way.
-		echo Format it as NTFS using DuckPart and try again.
+		echo Device Windows drive !WINDRIVE!^: is not empty.
 		echo.
-		pause
-		call :MAIN
+		echo|set /p="Do you want to format it? [y/n]: " & choice /c yn /n
+		if !errorlevel!==2 (
+			call :MAIN
+		) else (
+			echo.
+			echo Formatting device Windows drive !WINDRIVE!^:...
+			echo select volume !WINDRIVE! > diskpart_script.tmp
+			for /f "tokens=2 delims==" %%a in ('wmic logicaldisk where "DeviceID='!WINDRIVE!:'" get VolumeName /value ^| findstr "="') do (
+				echo format quick fs=ntfs label=^"%%a^" >> diskpart_script.tmp
+			)
+			echo exit >> diskpart_script.tmp
+			echo ______________________________________
+			diskpart /s diskpart_script.tmp && (
+				echo ______________________________________
+				echo      Done.
+			) || (
+				echo ______________________________________
+				echo      Failed.
+				echo      Format it using duckpart and try again.
+				echo.
+				pause
+				if exist diskpart_script.tmp del diskpart_script.tmp
+				call :MAIN
+			)
+			if exist diskpart_script.tmp del diskpart_script.tmp
+		)
 	)
 
 	cls
@@ -374,7 +396,7 @@ goto :EOF
 			echo select volume !SELVOL!
 			echo assign letter !ESPDRIVE!
 		) > diskpart_script.tmp
-		echo Assigning Volume !SELVOL! as !ESPDRIVE!:...
+		echo Assigning Volume !SELVOL! as !ESPDRIVE!^:...
 		diskpart /s diskpart_script.tmp >nul 2>&1 && (
 			echo      Done.
 		) || (
@@ -384,7 +406,7 @@ goto :EOF
 			pause
 			call :MAIN
 		)
-		del diskpart_script.tmp
+		if exist diskpart_script.tmp del diskpart_script.tmp
 	) else if !errorlevel!==1 (
 		set DRIVES_LIST=
 		set DRIVES_LIST_CHOICE=
@@ -411,7 +433,7 @@ goto :EOF
 	:: Check if user chose PC Windows to install wim file
 	if /I !ESPDRIVE!==!HOSTDRIVE! (
 		echo.
-		echo !HOSTDRIVE!: is already being used by PC Windows.
+		echo !HOSTDRIVE!^: is already being used by PC Windows.
 		echo Pay more attention next time.
 		echo.
 		pause
@@ -421,12 +443,34 @@ goto :EOF
 	:: Check ESP drive is empty
 	dir !ESPDRIVE!:\* >nul 2>&1 && (
 		echo.
-		echo Device ESP drive !ESPDRIVE!: is not empty.
-		echo Can not proceed this way.
-		echo Format it as FAT32 using DuckPart and try again.
+		echo Device ESP drive !ESPDRIVE!^: is not empty.
 		echo.
-		pause
-		call :MAIN
+		echo|set /p="Do you want to format it using diskpart? [y/n]: " & choice /c yn /n
+		if !errorlevel!==2 (
+			call :MAIN
+		) else (
+			echo.
+			echo Formatting device ESP drive !ESPDRIVE!^:...
+			echo select volume !ESPDRIVE! > diskpart_script.tmp
+			for /f "tokens=2 delims==" %%a in ('wmic logicaldisk where "DeviceID='!ESPDRIVE!:'" get VolumeName /value ^| findstr "="') do (
+				echo format quick fs=fat32 label=^"%%a^" >> diskpart_script.tmp
+			)
+			echo exit >> diskpart_script.tmp
+			echo ______________________________________
+			diskpart /s diskpart_script.tmp && (
+				echo ______________________________________
+				echo      Done.
+			) || (
+				echo ______________________________________
+				echo      Failed.
+				echo      Format it using duckpart and try again.
+				echo.
+				pause
+				if exist diskpart_script.tmp del diskpart_script.tmp
+				call :MAIN
+			)
+			if exist diskpart_script.tmp del diskpart_script.tmp
+		)
 	)
 
 	:: Check if ESP drive chose is the same device Windows letter
@@ -441,7 +485,7 @@ goto :EOF
 
 	:IMAGE_FILE_SELECTION
 	cls
-	echo ^> D. Deploy Windows image ^(.img or .esd^)
+	echo ^> D. Deploy Windows image ^(.img, .iso or .esd^)
 	echo.
 	echo Step 1 - Select device Windows drive: !WINDRIVE!
 	echo Step 2 - Select device ESP drive:     !ESPDRIVE!
@@ -465,7 +509,7 @@ goto :EOF
 		goto IMAGE_FILE_SELECTION
 	)
 	cls
-	echo ^> D. Deploy Windows image ^(.img or .esd^)
+	echo ^> D. Deploy Windows image ^(.img, .iso or .esd^)
 	echo.
 	echo Step 1 - Select device Windows drive: !WINDRIVE!
 	echo Step 2 - Select device ESP drive:     !ESPDRIVE!
@@ -511,7 +555,7 @@ goto :EOF
 	)
 
 	cls
-	echo ^> D. Deploy Windows image ^(.img or .esd^)
+	echo ^> D. Deploy Windows image ^(.img, .iso or .esd^)
 	echo.
 	echo.
 	echo Device Windows drive:      !WINDRIVE!:
@@ -564,7 +608,7 @@ goto :EOF
 	:REGISTRY_OPTIONS
 	bcdedit /store %ESPDRIVE%:\EFI\Microsoft\BOOT\BCD /enum {default} > bcdedit.tmp
 	cls
-	echo ^> D. Deploy Windows image ^(.img or .esd^)
+	echo ^> D. Deploy Windows image ^(.img, .iso or .esd^)
 	echo  ^'-^> Post-installation set up
 	echo.
 	echo.
@@ -639,7 +683,7 @@ REM	Recovery capabilities
 	)
 	echo    Sometimes Windows breaks UFS GPT layout on trying to fix a boot failure. I recommend set it OFF.
 	echo.
-	
+
 	echo I. Import a .reg file.
 	echo.
 
@@ -705,7 +749,7 @@ REM	Recovery capabilities
 		)
 		
 		cls
-		echo ^> D. Deploy Windows image ^(.img or .esd^)
+		echo ^> D. Deploy Windows image ^(.img, .iso or .esd^)
 		echo  ^'-^> Post-installation set up
 		echo    ^'-^> I. Import a .reg file.
 		echo.
@@ -899,7 +943,7 @@ goto :EOF
 			set "device_name=%%a"
 		)
 	)
-	
+
 	call :UPPERCASE device_name
 	cls
 	echo ^> Patch recovery
@@ -968,7 +1012,7 @@ goto :EOF
 		)
 	)
 	echo.
-	
+
 	for /f "tokens=1,* delims==" %%a in ('findstr /b /c:"ro.build.product=" "!AIK!\ramdisk\prop.default"') do (
 		set "device_name=%%b"
 	)
