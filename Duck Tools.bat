@@ -26,18 +26,10 @@ if not exist Files (
 	pause
 	exit
 )
-adb > nul 2>&1 || (
-	set "miss_pkg=adb"
-)
-fastboot > nul 2>&1 || (
-	if "!miss_pkg"!=="" (
-		set "miss_pkg=fastboot"
-	)
-)
-if not "!miss_pkg"!=="" (
+adb version > nul 2>&1 || (
 	echo Error.
 	echo.
-	echo !miss_pkg!.exe is missing.
+	echo adb.exe is missing.
 	echo.
 	echo D. Go to 15 Seconds Adb installer download page
 	echo S. Select adb.exe directory
@@ -51,7 +43,7 @@ if not "!miss_pkg"!=="" (
 		exit
 	) else if !errorlevel!==2 (
 		:PICK_ADB
-		for /f "delims=" %%A in ('powershell -Command "& {Add-Type -AssemblyName System.Windows.Forms; $openFileDialog = New-Object System.Windows.Forms.OpenFileDialog; $openFileDialog.Filter = '|!miss_pkg!.exe'; $openFileDialog.Title = 'Select !miss_pkg!.exe'; $openFileDialog.InitialDirectory = '!DIR!'; $openFileDialog.ShowDialog() | Out-Null; $openFileDialog.FileName}"') do set "ADB_DIR=%%~dpA"
+		for /f "delims=" %%A in ('powershell -Command "& {Add-Type -AssemblyName System.Windows.Forms; $openFileDialog = New-Object System.Windows.Forms.OpenFileDialog; $openFileDialog.Filter = '|adb.exe'; $openFileDialog.Title = 'Select adb.exe'; $openFileDialog.InitialDirectory = '!DIR!'; $openFileDialog.ShowDialog() | Out-Null; $openFileDialog.FileName}"') do set "ADB_DIR=%%~dpA"
 		echo.
 		if not exist "!ADB_DIR!" (
 			echo|set /p="Do you want to try again? [y/n]: " & choice /c yn /n
@@ -68,10 +60,10 @@ if not "!miss_pkg"!=="" (
 				set "reg_path=%%B;!ADB_DIR!"
 			)
 			echo.
-			echo Adding !miss_pkg! path into PATH...
+			echo Adding adb path into PATH...
 			reg add "HKLM\System\CurrentControlSet\Control\Session Manager\Environment" /f /v Path /t REG_SZ /d "!reg_path!\">nul 2>&1&& (
 				echo      Done.
-				echo      Since you keep !miss_pkg! binary in this same path, you will not be prompet about it.
+				echo      Since you keep adb binary in this same path, you will not be prompet about it.
 				echo      This change will take effect in the next logon.
 			) || (
 				echo      Failed.
