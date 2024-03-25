@@ -553,15 +553,28 @@ goto :EOF
 	) else (
 		set INDEX=1
 	)
+	set "line_number=0"
+	set exit_gin=0
+	for /f "tokens=*" %%a in ('dism /Get-WimInfo /WimFile:"!WIMFILE!"') do (
+		set /a line_number+=1
+		set "line=%%a"
+		set "line=!line:*:=!"
+		if !exit_gin!==1 (
+			set "INDEX_PRODUCT=!line!"
+			goto exit_gin
+		)
+		if "!line!"==" !INDEX!" set exit_gin=1
+	)
+	:exit_gin
 
 	cls
 	echo ^> D. Deploy Windows image ^(.img, .iso or .esd^)
 	echo.
 	echo.
-	echo Device Windows drive:      !WINDRIVE!:
-	echo Device ESP drive:          !ESPDRIVE!:
-	echo Windows installation file: !WIMFILE!
-	echo Windows version index:     !INDEX!
+	echo Device Windows drive:  !WINDRIVE!:
+	echo Device ESP drive:      !ESPDRIVE!:
+	echo Windows image file:    !WIMFILE!
+	echo Windows product:      !INDEX_PRODUCT!
 	echo.
 	echo|set /p="Proceed with deployment? [y/n]: " & choice /c yn /n
 	if !errorlevel!==2 (
